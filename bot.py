@@ -15,6 +15,8 @@ if sys.platform == "win32":
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
@@ -24,14 +26,14 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiohttp import web
 
-from places_data import PLACES, CATEGORY_NAMES, DISTANCE_GROUPS
+from places_data import CATEGORY_NAMES, DISTANCE_GROUPS
 import db
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Инициализация базы данных
+# Инициализация базы данных и синхронизация
 db.init_db()
 
 # Получение токена
@@ -49,12 +51,20 @@ bot = Bot(token=TOKEN) if TOKEN and TOKEN != "YOUR_TELEGRAM_BOT_TOKEN_HERE" else
 dp = Dispatcher()
 
 
+# FSM для добавления собственного места
+class AddPlaceForm(StatesGroup):
+    waiting_title = State()
+    waiting_vibe = State()
+    waiting_map = State()
+
+
 def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
     """Главная постоянная клавиатура бота."""
     kb = [
         [KeyboardButton(text="🧭 Смотреть локации"), KeyboardButton(text="⭐ Избранное")],
+        [KeyboardButton(text="🔄 Обновить базу мест"), KeyboardButton(text="➕ Добавить место")],
         [KeyboardButton(text="📏 Фильтр расстояния"), KeyboardButton(text="📊 Мой профиль")],
-        [KeyboardButton(text="🔄 Сбросить историю")]
+        [KeyboardButton(text="🔁 Сбросить историю")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
@@ -62,8 +72,9 @@ def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
 def format_card(place: Dict[str, Any]) -> str:
     """Форматирование одной карточки локации."""
     cat_emoji = CATEGORY_NAMES.get(place.get("category", ""), "📍")
+    custom_badge = " <i>[Добавлено сообществом]</i>" if place.get("is_custom") else ""
     text = (
-        f"<b>{place['title']}</b>\n"
+        f"<b>{place['title']}</b>{custom_badge}\n"
         f"<i>{cat_emoji}</i>\n\n"
         f"⏱ <b>От м. Озерки:</b> ~{place['distance_km']} км ({place['car_time']})\n\n"
         f"✨ <b>Вайб (Pinterest/TikTok):</b>\n{place['vibe']}\n\n"
@@ -97,15 +108,16 @@ async def cmd_start(message: types.Message):
     dist_name = DISTANCE_GROUPS.get(dist_filter, "Все")
     
     greeting = (
-        "👋 <b>Добро пожаловать в гид по атмосферным локациям СПб и ЛО!</b>\n\n"
+        "👋 <b>Добро пожаловать в обновленный гид по атмосферным локациям СПб и ЛО!</b>\n\n"
         "📍 <b>Точка старта: м. «Озерки»</b> (быстрый выезд на Выборгское ш., Скандинавию, Сортавалу и КАД).\n"
-        "Здесь собраны самые вирусные и эстетичные места из <b>TikTok и Pinterest</b>: "
-        "экотропы, маяки, песчаные дюны, карельские скалы и заброшенные кирхи.\n\n"
+        "Здесь собраны небанальные, редкие и эстетичные места из <b>TikTok и Pinterest</b>: "
+        "экотропы, маяки, песчаные дюны, карельские скалы, водопады и заброшенные кирхи.\n\n"
         "💡 <b>Как это работает:</b>\n"
         "• Локации показываются <b>по одной</b>.\n"
         "• Жми <b>❤️ В избранное</b>, чтобы сохранить в коллекцию.\n"
         "• Жми <b>➡️ Пропустить</b>, чтобы листать дальше (места не будут повторяться!).\n"
-        "• Бот <b>запоминает твой вкус</b> и предлагает похожие места в первую очередь!\n\n"
+        "• <b>🔄 База данных обновляется автоматически</b>, пополняясь новыми точками.\n"
+        "• Ты также можешь нажать <b>«➕ Добавить место»</b>, чтобы сохранить свой секретный спот!\n\n"
         f"🎯 Текущий фильтр расстояния: <b>{dist_name}</b>"
     )
     await message.answer(greeting, parse_mode="HTML", reply_markup=get_main_menu_keyboard())
@@ -123,9 +135,10 @@ async def show_feed(message: types.Message):
         await message.answer(
             f"🎉 <b>Ты просмотрел все локации в фильтре «{dist_name}»!</b>\n\n"
             "Что можно сделать:\n"
-            "1. Нажать <b>«📏 Фильтр расстояния»</b> и выбрать другой радиус (например, дальше 50 или 80 км).\n"
-            "2. Открыть <b>«⭐ Избранное»</b> и изучить сохраненные места.\n"
-            "3. Нажать <b>«🔄 Сбросить историю»</b>, чтобы пролистать все места заново.",
+            "1. Нажать <b>«🔄 Обновить базу мест»</b> — бот подгрузит свежие точки.\n"
+            "2. Нажать <b>«📏 Фильтр расстояния»</b> и выбрать больший радиус (например, дальше 50 или 80 км).\n"
+            "3. Открыть <b>«⭐ Избранное»</b> и изучить сохраненные маршруты.\n"
+            "4. Нажать <b>«🔁 Сбросить историю»</b>, чтобы пролистать всё с чистого листа.",
             parse_mode="HTML"
         )
         return
@@ -145,13 +158,12 @@ async def handle_like(callback: types.CallbackQuery):
     db.record_reaction(user_id, place_id, "liked")
     await callback.answer("Сохранено в Избранное! ⭐", show_alert=False)
     
-    # Показываем следующее умное место
     next_place = db.get_next_smart_place(user_id)
     if not next_place:
         await callback.message.edit_text(
             "🎉 <b>Отлично! Ты просмотрел все доступные локации в этом фильтре!</b>\n\n"
             "Все сохраненные споты ждут тебя во вкладке <b>«⭐ Избранное»</b>.\n"
-            "Чтобы расширить радиус, нажми <b>«📏 Фильтр расстояния»</b> в меню.",
+            "Жми <b>«🔄 Обновить базу мест»</b> внизу, чтобы найти новые!",
             parse_mode="HTML"
         )
         return
@@ -173,7 +185,7 @@ async def handle_skip(callback: types.CallbackQuery):
     if not next_place:
         await callback.message.edit_text(
             "🎉 <b>Ты просмотрел все локации в этом фильтре!</b>\n\n"
-            "Попробуй выбрать больший радиус в меню <b>«📏 Фильтр расстояния»</b> или сбросить историю в <b>«🔄 Сбросить историю»</b>.",
+            "Попробуй выбрать больший радиус в меню <b>«📏 Фильтр расстояния»</b> или нажми <b>«🔄 Обновить базу мест»</b>.",
             parse_mode="HTML"
         )
         return
@@ -181,6 +193,118 @@ async def handle_skip(callback: types.CallbackQuery):
     card_text = format_card(next_place)
     kb = get_swipe_keyboard(next_place["id"], next_place["yandex_map"])
     await callback.message.edit_text(card_text, parse_mode="HTML", reply_markup=kb)
+
+
+# ---------------- АВТО-ОБНОВЛЕНИЕ БАЗЫ ДАННЫХ ----------------
+
+@dp.message(F.text == "🔄 Обновить базу мест")
+async def manual_update_database(message: types.Message):
+    """Принудительное обновление и поиск новых локаций."""
+    status_msg = await message.answer("🔄 <i>Сканируем новые локации и обновляем базу данных...</i>", parse_mode="HTML")
+    await asyncio.sleep(1) # Небольшая пауза для эффекта
+    
+    added_count, total_count = db.auto_update_and_expand_places()
+    
+    if added_count > 0:
+        result_text = (
+            "✅ <b>База данных успешно обновлена и расширена!</b>\n\n"
+            f"✨ <b>Добавлено новых локаций:</b> {added_count}\n"
+            f"🗺 <b>Всего спотов в коллекции:</b> {total_count}\n\n"
+            "Среди новинок: водопады, марсианские карьеры, норвежские скалы, шведские кирхи и тайные маяки!\n\n"
+            "Жми <b>«🧭 Смотреть локации»</b>, чтобы исследовать свежие маршруты!"
+        )
+    else:
+        result_text = (
+            "✅ <b>База данных в самом актуальном состоянии!</b>\n\n"
+            f"🗺 Всего в каталоге доступно: <b>{total_count} уникальных локаций</b>.\n"
+            "Новые места автоматически синхронизируются в фоне каждые 12 часов.\n\n"
+            "Если ты знаешь классное тайное место, которого ещё нет — нажми <b>«➕ Добавить место»</b>!"
+        )
+    
+    await status_msg.edit_text(result_text, parse_mode="HTML", reply_markup=get_main_menu_keyboard())
+
+
+# ---------------- ДОБАВЛЕНИЕ СВОЕГО МЕСТА (FSM) ----------------
+
+@dp.message(F.text == "➕ Добавить место")
+async def start_add_place(message: types.Message, state: FSMContext):
+    await state.set_state(AddPlaceForm.waiting_title)
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="Отмена", callback_data="cancel_add_place"))
+    
+    await message.answer(
+        "📍 <b>Добавление новой локации в общую базу</b>\n\n"
+        "Шаг 1 из 3: Введи <b>название места</b> (например: <i>Скала Любви на Вуоксе</i>):",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
+
+
+@dp.callback_query(F.data == "cancel_add_place")
+async def cancel_add_place_handler(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("❌ Добавление места отменено.", parse_mode="HTML")
+
+
+@dp.message(AddPlaceForm.waiting_title)
+async def process_place_title(message: types.Message, state: FSMContext):
+    await state.update_data(title=message.text.strip())
+    await state.set_state(AddPlaceForm.waiting_vibe)
+    
+    await message.answer(
+        "✨ Шаг 2 из 3: Опиши <b>вайб и атмосферу</b> (почему стоит поехать, что там особенного?):",
+        parse_mode="HTML"
+    )
+
+
+@dp.message(AddPlaceForm.waiting_vibe)
+async def process_place_vibe(message: types.Message, state: FSMContext):
+    await state.update_data(vibe=message.text.strip())
+    await state.set_state(AddPlaceForm.waiting_map)
+    
+    await message.answer(
+        "🗺 Шаг 3 из 3: Отправь <b>ссылку на Яндекс.Карты</b> или ориентир (название населенного пункта / координаты):",
+        parse_mode="HTML"
+    )
+
+
+@dp.message(AddPlaceForm.waiting_map)
+async def process_place_map(message: types.Message, state: FSMContext):
+    map_link = message.text.strip()
+    data = await state.get_data()
+    await state.clear()
+    
+    import time
+    place_id = f"custom_{int(time.time())}"
+    
+    new_place = {
+        "id": place_id,
+        "title": data["title"],
+        "category": "nature",
+        "distance_km": 50,
+        "car_time": "45-60 мин",
+        "range_group": "50",
+        "vibe": data["vibe"],
+        "season": "Круглый год",
+        "time_of_day": "День или закат",
+        "car_access": "Ориентируйтесь по Яндекс.Картам",
+        "photo_tips": "Красивые панорамы и природа",
+        "yandex_map": map_link if map_link.startswith("http") else f"https://yandex.ru/maps/?text={map_link}"
+    }
+    
+    success = db.add_custom_place(new_place)
+    if success:
+        await message.answer(
+            f"🎉 <b>Локация «{data['title']}» успешно добавлена в базу данных!</b>\n\n"
+            "Теперь она доступна в общей ленте рекомендаций. Спасибо за вклад в каталог!",
+            parse_mode="HTML",
+            reply_markup=get_main_menu_keyboard()
+        )
+    else:
+        await message.answer(
+            "⚠️ Произошла ошибка при сохранении. Попробуйте еще раз позже.",
+            reply_markup=get_main_menu_keyboard()
+        )
 
 
 # ---------------- ИЗБРАННОЕ ----------------
@@ -193,7 +317,7 @@ async def show_favorites(message: types.Message):
     if not favorites:
         await message.answer(
             "⭐ <b>Твое избранное пока пусто!</b>\n\n"
-            "Нажми <b>«🧭 Смотреть локации»</b> и жми <b>❤️ В избранное</b> на местах, которые тебе понравятся.",
+            "Нажми <b>«🧭 Смотреть локации»</b> и жми <b>❤️ В избранное</b> на понравившихся местах.",
             parse_mode="HTML"
         )
         return
@@ -216,7 +340,7 @@ async def view_favorite_place(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     place_id = callback.data.split("_", 2)[2]
     
-    place = next((p for p in PLACES if p["id"] == place_id), None)
+    place = db.get_place_by_id(place_id)
     if not place:
         await callback.answer("Локация не найдена!", show_alert=True)
         return
@@ -239,7 +363,6 @@ async def delete_favorite_place(callback: types.CallbackQuery):
     db.remove_favorite(user_id, place_id)
     await callback.answer("Удалено из избранного!", show_alert=True)
     
-    # Обновляем список избранного
     favorites = db.get_user_favorites(user_id)
     if not favorites:
         await callback.message.edit_text(
@@ -343,7 +466,7 @@ async def user_profile(message: types.Message):
 
 # ---------------- СБРОС ИСТОРИИ ----------------
 
-@dp.message(F.text == "🔄 Сбросить историю")
+@dp.message(F.text == "🔁 Сбросить историю")
 async def reset_history_prompt(message: types.Message):
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -377,6 +500,21 @@ async def cancel_reset_history(callback: types.CallbackQuery):
     await callback.message.delete()
 
 
+async def background_auto_updater():
+    """Периодическое автоматическое обновление базы данных в фоне каждые 12 часов."""
+    while True:
+        try:
+            await asyncio.sleep(43200) # 12 часов
+            added, total = db.auto_update_and_expand_places()
+            if added > 0:
+                logger.info(f"[Авто-обновление] Успешно добавлено {added} новых локаций. Всего: {total}")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"[Авто-обновление] Ошибка при фоновом обновлении: {e}")
+            await asyncio.sleep(3600)
+
+
 async def start_health_check_server():
     """Мини веб-сервер для облачных платформ (Render, Koyeb и т.д.), чтобы сервис не засыпал."""
     app = web.Application()
@@ -405,11 +543,15 @@ async def main():
         
     print("=" * 60)
     print("[+] Умный бот локаций СПб (старт: м. Озерки) запущен!")
-    print("[+] База данных SQLite подключена.")
+    print("[+] База данных SQLite подключена (49+ локаций).")
+    print("[+] Фоновое авто-обновление базы данных активировано.")
     print("=" * 60)
     
     # Запускаем фоновый health-check сервер для облака
     await start_health_check_server()
+    
+    # Запускаем фоновое авто-обновление базы
+    asyncio.create_task(background_auto_updater())
     
     # Запуск polling телеграма
     await dp.start_polling(bot)
