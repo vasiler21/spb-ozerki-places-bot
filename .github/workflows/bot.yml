@@ -10,6 +10,9 @@ concurrency:
   group: telegram-bot-runner
   cancel-in-progress: true
 
+permissions:
+  contents: write
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
@@ -35,3 +38,13 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
           python bot.py
+
+      - name: Persist Discovered Places
+        if: always()
+        run: |
+          git config --local user.email "bot-action@github.com"
+          git config --local user.name "Bot Discovery Agent"
+          if [ -f discovered_places.json ]; then
+            git add discovered_places.json
+            git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-discovery: save newly analyzed places [skip ci]" && git push)
+          fi
