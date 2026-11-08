@@ -4,11 +4,11 @@ Telegram-бот для поиска атмосферных мест севера
 Старт: м. Озерки (Выборгское / Приморское шоссе, Скандинавия, Сортавала, КАД).
 Радиус: строго до 50 км.
 Особенности:
-- Фильтр по времени: ночные споты (24/7 доступ, открытый въезд на авто).
+- Фильтр по времени: ночные споты (24/7 доступ, открытый въезд на авто по умолчанию).
 - Спец-описание для ночного чилла: вид из машины, где постоять, покурить, отдохнуть.
 - Выбор зон: Курортный р-н, Дамба, Токсово/озера, Север СПб, Ладога.
-- Отметка «✅ Уже был здесь» (исключает место из будущих показов).
-- Автоматическое обновление базы каждые 6-12 часов и сбор новых локаций.
+- Отметка «✅ Уже был здесь» (навсегда исключает место из показа).
+- Поддержка как нового интерфейса, так и старых кнопок с авто-обновлением клавиатуры.
 """
 
 import os
@@ -70,26 +70,26 @@ class AddPlaceForm(StatesGroup):
 
 
 def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
-    """Главная клавиатура бота."""
+    """Главная компактная клавиатура бота."""
     kb = [
-        [KeyboardButton(text="🧭 Смотреть локации"), KeyboardButton(text="⭐ Избранное")],
+        [KeyboardButton(text="🧭 Смотреть локации")],
         [KeyboardButton(text="🌙 Ночной фильтр (24/7)"), KeyboardButton(text="📏 Дистанция (до 50 км)")],
         [KeyboardButton(text="📍 Выбор зоны"), KeyboardButton(text="✅ Где я был")],
-        [KeyboardButton(text="🔄 Обновить базу"), KeyboardButton(text="📊 Мой профиль")],
-        [KeyboardButton(text="➕ Добавить место"), KeyboardButton(text="🔁 Сбросить всё")]
+        [KeyboardButton(text="⭐ Избранное"), KeyboardButton(text="📊 Мой профиль")],
+        [KeyboardButton(text="🔄 Обновить базу"), KeyboardButton(text="🔁 Сбросить всё")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 
 def format_card(place: Dict[str, Any]) -> str:
-    """Форматирование карточки локации с акцентом на ночной чилл и доступность."""
+    """Красивая карточка с акцентом на ночной чилл, координаты и доступность 24/7."""
     cat_emoji = CATEGORY_NAMES.get(place.get("category", ""), "📍")
     zone_name = ZONE_NAMES.get(place.get("zone", ""), "Север СПб и ЛО")
     
     # Бейдж популярности
     pop = place.get("popularity", "hidden")
     if place.get("is_custom"):
-        badge = " <i>[Добавлено сообществом]</i>"
+        badge = " <i>[Добавлено тобой]</i>"
     elif pop == "secret":
         badge = " 🔥 <b>[Секретный спот]</b>"
     elif pop == "hidden":
@@ -99,17 +99,17 @@ def format_card(place: Dict[str, Any]) -> str:
         
     # Статус доступности 24/7
     if place.get("is_24_7", 1):
-        access_badge = "🟢 <b>ДОСТУП:</b> Круглосуточно 24/7 (въезд открыт, шлагбаумов нет)"
+        access_badge = "🟢 <b>ВЪЕЗД:</b> Круглосуточно 24/7 (въезд открыт, шлагбаумов нет)"
     else:
-        access_badge = f"🔴 <b>ДОСТУП:</b> {place.get('opening_hours', 'Только днем')} (ночью закрыто!)"
+        access_badge = f"🔴 <b>ВЪЕЗД:</b> {place.get('opening_hours', 'Только днем')} (ночью закрыто!)"
 
     # Описание ночного чилла
     night_block = ""
     if place.get("night_vibe"):
-        car_chill_icon = "🚗 " if place.get("car_chill") else "🚶‍♂️ "
+        car_icon = "🚗 " if place.get("car_chill") else "🚶‍♂️ "
         night_block = (
-            f"\n\n🌙 <b>Ночной вайб & Чилл в машине:</b>\n"
-            f"{car_chill_icon}{place['night_vibe']}"
+            f"\n\n🌙 <b>Ночной вайб (чилл / покурить / вид):</b>\n"
+            f"{car_icon}{place['night_vibe']}"
         )
 
     text = (
@@ -119,7 +119,7 @@ def format_card(place: Dict[str, Any]) -> str:
         f"{access_badge}\n\n"
         f"✨ <b>Вайб и атмосфера:</b>\n{place['vibe']}"
         f"{night_block}\n\n"
-        f"🚙 <b>Подъезд и парковка:</b>\n{place['car_access']}\n\n"
+        f"🚙 <b>Дорога и парковка:</b>\n{place['car_access']}\n\n"
         f"📸 <b>Идеи для фото:</b> {place['photo_tips']}\n"
     )
     return text
@@ -133,7 +133,7 @@ def get_swipe_keyboard(place_id: str, yandex_map_url: str) -> InlineKeyboardMark
         InlineKeyboardButton(text="➡️ Пропустить", callback_data=f"skip_{place_id}")
     )
     builder.row(
-        InlineKeyboardButton(text="✅ Уже был здесь", callback_data=f"visited_{place_id}")
+        InlineKeyboardButton(text="✅ Уже был здесь (больше не показывать)", callback_data=f"visited_{place_id}")
     )
     builder.row(
         InlineKeyboardButton(text="🗺 Маршрут в Яндекс.Картах", url=yandex_map_url)
@@ -149,31 +149,29 @@ async def cmd_start(message: types.Message):
     dist_val = db.get_user_distance_filter(user_id)
     dist_name = DISTANCE_GROUPS.get(dist_val, f"До {dist_val} км")
     time_val = db.get_user_time_filter(user_id)
-    time_name = TIME_FILTERS.get(time_val, "Любое время")
+    time_name = TIME_FILTERS.get(time_val, "Ночные споты 24/7")
     zone_val = db.get_user_zone_filter(user_id)
-    zone_name = ZONE_NAMES.get(zone_val, "Весь Север")
+    zone_name = ZONE_NAMES.get(zone_val, "Весь Север СПб и ЛО")
     
     greeting = (
-        "👋 <b>Добро пожаловать в гид по атмосферным и ночным локациям севера СПб и ЛО!</b>\n\n"
-        "📍 <b>Точка старта: м. «Озерки»</b> (Выборгское/Приморское ш., трасса «Скандинавия», КАД и Дамба).\n"
-        "Радиус: <b>строго до 50 км</b> (никаких дальних поездок на 100+ км).\n\n"
-        "🌙 <b>Идеально для ночных поездок:</b>\n"
-        "• Проверена доступность 24/7 (свободный подъезд без шлагбаумов и закрытых ворот).\n"
-        "• Места, где можно встать на машине, повайбить, покурить, выпить кофе и посмотреть на огни ночного города или воду залива.\n"
-        "• Секретные и небанальные точки: мысы залива, смотровые дамбы, карельские озера и сосновые обрывы.\n\n"
-        "💡 <b>Управление:</b>\n"
-        "• Жми <b>❤️ В избранное</b>, чтобы сохранить спот.\n"
-        "• Жми <b>✅ Уже был здесь</b>, чтобы исключить локацию из будущих предложений.\n"
-        "• Жми <b>➡️ Пропустить</b>, чтобы листать дальше.\n\n"
+        "👋 <b>Гид по ночным и атмосферным локациям севера СПб и ЛО обновлен!</b>\n\n"
+        "📍 <b>Точка старта: м. «Озерки»</b> (Выборгское/Приморское ш., «Скандинавия», «Сортавала», КАД и Дамба).\n"
+        "Радиус поиска: <b>строго до 50 км</b> (все дальние точки отсечены!).\n\n"
+        "🌙 <b>Что настроено:</b>\n"
+        "• <b>Ночной фильтр включен по умолчанию:</b> показываются только локации с открытым круглосуточным въездом на машине без закрытых ворот и шлагбаумов.\n"
+        "• <b>Авто-чилл:</b> для каждого места написано, где встать, какой вид на воду/огни и можно ли постоять у капота с кофе или покурить.\n"
+        "• <b>Кнопка «✅ Уже был здесь»:</b> жми на знакомых местах, и бот навсегда скроет их из ленты.\n\n"
         f"🎯 <b>Текущие настройки:</b>\n"
-        f"• Радиус: <b>{dist_name}</b>\n"
-        f"• Время суток: <b>{time_name}</b>\n"
-        f"• Зона: <b>{zone_name}</b>"
+        f"• Режим: <b>{time_name}</b>\n"
+        f"• Макс. дистанция: <b>{dist_name}</b>\n"
+        f"• Направление: <b>{zone_name}</b>\n\n"
+        "Жми <b>«🧭 Смотреть локации»</b>, чтобы начать выбор спота!"
     )
     await message.answer(greeting, parse_mode="HTML", reply_markup=get_main_menu_keyboard())
 
 
-@dp.message(F.text == "🧭 Смотреть локации")
+# Обработка как новых, так и старых кнопок просмотра
+@dp.message(F.text.in_(["🧭 Смотреть локации", "Смотреть локации", "🧭 Найти ночной спот (до 50 км)"]))
 async def show_feed(message: types.Message):
     """Показать следующую подходящую локацию."""
     user_id = message.from_user.id
@@ -186,14 +184,15 @@ async def show_feed(message: types.Message):
         time_name = TIME_FILTERS.get(time_val, "выбранном режиме")
         
         await message.answer(
-            f"🎉 <b>Ты просмотрел все доступные локации ({dist_name}, {time_name})!</b>\n\n"
-            "Что можно сделать:\n"
-            "1. Нажать <b>«🔄 Обновить базу»</b> — бот подгрузит свежие точки с карт и пула.\n"
-            "2. Переключить <b>«🌙 Ночной фильтр»</b> или <b>«📍 Выбор зоны»</b>.\n"
+            f"🎉 <b>Ты просмотрел все доступные споты ({dist_name}, {time_name})!</b>\n\n"
+            "Что можно сделать прямо сейчас:\n"
+            "1. Нажать <b>«🔄 Обновить базу»</b> — бот подгрузит свежие точки.\n"
+            "2. Переключить <b>«🌙 Ночной фильтр»</b> (например, посмотреть закатные споты) или сменить <b>«📍 Зону»</b>.\n"
             "3. Увеличить радиус в <b>«📏 Дистанция»</b> (до 50 км).\n"
-            "4. Заглянуть в <b>«✅ Где я был»</b> или <b>«⭐ Избранное»</b>.\n"
+            "4. Открыть <b>«✅ Где я был»</b> или <b>«⭐ Избранное»</b>.\n"
             "5. Нажать <b>«🔁 Сбросить всё»</b>, чтобы пролистать базу заново.",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=get_main_menu_keyboard()
         )
         return
         
@@ -256,13 +255,13 @@ async def handle_visited(callback: types.CallbackQuery):
     place_id = callback.data.split("_", 1)[1]
     
     db.record_reaction(user_id, place_id, "visited")
-    await callback.answer("Отмечено: «Уже был здесь»! ✅", show_alert=False)
+    await callback.answer("✅ Отмечено: «Был здесь»! Место скрыто из ленты.", show_alert=False)
     
     next_place = db.get_next_smart_place(user_id)
     if not next_place:
         await callback.message.edit_text(
             "✅ <b>Отметка сохранена!</b>\n\n"
-            "Это место добавлено в список <b>«✅ Где я был»</b> и больше не будет появляться в ленте.\n\n"
+            "Это место добавлено в список <b>«✅ Где я был»</b> и больше никогда не появится в ленте.\n\n"
             "🎉 Все остальные доступные локации в этом фильтре тоже просмотрены!",
             parse_mode="HTML"
         )
@@ -275,7 +274,7 @@ async def handle_visited(callback: types.CallbackQuery):
 
 # ---------------- РАЗДЕЛ: ГДЕ Я БЫЛ ----------------
 
-@dp.message(F.text == "✅ Где я был")
+@dp.message(F.text.in_(["✅ Где я был", "Где я был", "Посещенные места"]))
 async def show_visited_places(message: types.Message):
     user_id = message.from_user.id
     visited = db.get_user_visited(user_id)
@@ -283,10 +282,11 @@ async def show_visited_places(message: types.Message):
     if not visited:
         await message.answer(
             "✅ <b>Список посещенных мест пока пуст!</b>\n\n"
-            "Когда будешь листать ленту (<b>«🧭 Смотреть локации»</b>), "
-            "нажимай <b>«✅ Уже был здесь»</b> на знакомых спотах. "
-            "Бот запомнит их и больше не будет предлагать в ленте.",
-            parse_mode="HTML"
+            "Когда листаешь споты (<b>«🧭 Смотреть локации»</b>), "
+            "нажимай <b>«✅ Уже был здесь (больше не показывать)»</b> на знакомых точках. "
+            "Бот запомнит их и больше не станет предлагать в ленте.",
+            parse_mode="HTML",
+            reply_markup=get_main_menu_keyboard()
         )
         return
         
@@ -297,7 +297,7 @@ async def show_visited_places(message: types.Message):
         
     await message.answer(
         f"✅ <b>Места, где ты уже побывал ({len(visited)}):</b>\n"
-        "Они исключены из ленты рекомендаций. Нажми, чтобы открыть карточку или снять отметку:",
+        "Они исключены из ленты рекомендаций. Нажми, чтобы открыть карточку или вернуть место в ленту:",
         parse_mode="HTML",
         reply_markup=builder.as_markup()
     )
@@ -316,7 +316,7 @@ async def view_visited_place(callback: types.CallbackQuery):
     
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="🗺 Маршрут в Яндекс.Картах", url=place["yandex_map"]))
-    builder.row(InlineKeyboardButton(text="❌ Снять отметку «Был здесь»", callback_data=f"vis_del_{place['id']}"))
+    builder.row(InlineKeyboardButton(text="❌ Вернуть место в ленту рекомендаций", callback_data=f"vis_del_{place['id']}"))
     builder.row(InlineKeyboardButton(text="⬅️ Назад к списку посещенных", callback_data="vis_back_list"))
     
     await callback.message.edit_text(card_text, parse_mode="HTML", reply_markup=builder.as_markup())
@@ -374,7 +374,7 @@ async def back_to_visited_list(callback: types.CallbackQuery):
 
 # ---------------- ФИЛЬТР ПО ВРЕМЕНИ / НОЧНЫЕ МЕСТА ----------------
 
-@dp.message(F.text == "🌙 Ночной фильтр (24/7)")
+@dp.message(F.text.in_(["🌙 Ночной фильтр (24/7)", "🌙 Ночной фильтр", "Ночной фильтр", "Ночные места"]))
 async def select_time_filter(message: types.Message):
     user_id = message.from_user.id
     current_filter = db.get_user_time_filter(user_id)
@@ -386,9 +386,9 @@ async def select_time_filter(message: types.Message):
         
     await message.answer(
         "🌙 <b>Выбор фильтра по времени суток и доступности:</b>\n\n"
-        "• <b>🌙 Ночные споты 24/7</b>: покажет только места со свободным круглосуточным въездом "
-        "(без закрытых на ночь ворот, шлагбаумов и охранников) — где можно встать на машине, постоять, покурить и отдохнуть.\n"
-        "• <b>🌅 Закат</b>: видовые точки у воды и на возвышенностях.\n"
+        "• <b>🌙 Ночные споты 24/7</b>: только места со свободным круглосуточным въездом "
+        "(без заборов, шлагбаумов и закрытых ворот) — где можно встать на машине, постоять, покурить и отдохнуть.\n"
+        "• <b>🌅 Закат и вечер</b>: видовые точки у воды и на возвышенностях.\n"
         "• <b>☀️ Дневные</b>: парки, экотропы и прогулки.\n"
         "• <b>🌐 Любое время</b>: все доступные локации.",
         parse_mode="HTML",
@@ -414,7 +414,7 @@ async def save_time_filter(callback: types.CallbackQuery):
 
 # ---------------- ФИЛЬТР РАССТОЯНИЯ (СТРОГО ДО 50 КМ) ----------------
 
-@dp.message(F.text == "📏 Дистанция (до 50 км)")
+@dp.message(F.text.in_(["📏 Дистанция (до 50 км)", "📏 Фильтр расстояния", "Фильтр расстояния", "📏 Дистанция", "Дистанция"]))
 async def change_distance_filter(message: types.Message):
     user_id = message.from_user.id
     current_filter = db.get_user_distance_filter(user_id)
@@ -451,7 +451,7 @@ async def save_distance_filter(callback: types.CallbackQuery):
 
 # ---------------- ВЫБОР ЗОНЫ ----------------
 
-@dp.message(F.text == "📍 Выбор зоны")
+@dp.message(F.text.in_(["📍 Выбор зоны", "Выбор зоны", "Зона"]))
 async def select_zone_filter(message: types.Message):
     user_id = message.from_user.id
     current_zone = db.get_user_zone_filter(user_id)
@@ -479,7 +479,7 @@ async def save_zone_filter(callback: types.CallbackQuery):
     key = callback.data.split("_", 2)[2]
     
     db.set_user_zone_filter(user_id, key)
-    zone_name = ZONE_NAMES.get(key, "Весь Север")
+    zone_name = ZONE_NAMES.get(key, "Весь Север СПб и ЛО")
     
     await callback.answer(f"Зона: {zone_name}", show_alert=False)
     await callback.message.edit_text(
@@ -491,7 +491,7 @@ async def save_zone_filter(callback: types.CallbackQuery):
 
 # ---------------- ОБНОВЛЕНИЕ БАЗЫ ДАННЫХ ----------------
 
-@dp.message(F.text == "🔄 Обновить базу")
+@dp.message(F.text.in_(["🔄 Обновить базу", "🔄 Обновить базу мест", "Обновить базу"]))
 async def manual_update_database(message: types.Message):
     """Принудительное обновление, проверка доступности и поиск свежих локаций."""
     status_msg = await message.answer(
@@ -515,7 +515,7 @@ async def manual_update_database(message: types.Message):
 
 # ---------------- ИЗБРАННОЕ ----------------
 
-@dp.message(F.text == "⭐ Избранное")
+@dp.message(F.text.in_(["⭐ Избранное", "Избранное"]))
 async def show_favorites(message: types.Message):
     user_id = message.from_user.id
     favorites = db.get_user_favorites(user_id)
@@ -524,7 +524,8 @@ async def show_favorites(message: types.Message):
         await message.answer(
             "⭐ <b>Твое избранное пока пусто!</b>\n\n"
             "Нажми <b>«🧭 Смотреть локации»</b> и жми <b>❤️ В избранное</b> на понравившихся местах.",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=get_main_menu_keyboard()
         )
         return
         
@@ -634,98 +635,9 @@ async def back_to_fav_list(callback: types.CallbackQuery):
     )
 
 
-# ---------------- ДОБАВЛЕНИЕ СВОЕГО МЕСТА ----------------
-
-@dp.message(F.text == "➕ Добавить место")
-async def start_add_place(message: types.Message, state: FSMContext):
-    await state.set_state(AddPlaceForm.waiting_title)
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="Отмена", callback_data="cancel_add_place"))
-    
-    await message.answer(
-        "📍 <b>Добавление новой секретной точки в каталог</b>\n\n"
-        "Шаг 1 из 3: Введи <b>название места</b> (например: <i>Секретный мыс в Репино</i>):",
-        parse_mode="HTML",
-        reply_markup=builder.as_markup()
-    )
-
-
-@dp.callback_query(F.data == "cancel_add_place")
-async def cancel_add_place_handler(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.edit_text("❌ Добавление места отменено.", parse_mode="HTML")
-
-
-@dp.message(AddPlaceForm.waiting_title)
-async def process_place_title(message: types.Message, state: FSMContext):
-    await state.update_data(title=message.text.strip())
-    await state.set_state(AddPlaceForm.waiting_vibe)
-    
-    await message.answer(
-        "✨ Шаг 2 из 3: Опиши <b>вайб и почему круто ночью</b> (вид на воду, огни, можно ли постоять на машине, покурить):",
-        parse_mode="HTML"
-    )
-
-
-@dp.message(AddPlaceForm.waiting_vibe)
-async def process_place_vibe(message: types.Message, state: FSMContext):
-    await state.update_data(vibe=message.text.strip())
-    await state.set_state(AddPlaceForm.waiting_map)
-    
-    await message.answer(
-        "🗺 Шаг 3 из 3: Отправь <b>ссылку на Яндекс.Карты</b> или ориентир:",
-        parse_mode="HTML"
-    )
-
-
-@dp.message(AddPlaceForm.waiting_map)
-async def process_place_map(message: types.Message, state: FSMContext):
-    map_link = message.text.strip()
-    data = await state.get_data()
-    await state.clear()
-    
-    import time
-    place_id = f"custom_{int(time.time())}"
-    
-    new_place = {
-        "id": place_id,
-        "title": data["title"],
-        "category": "night_chill",
-        "zone": "kurortny",
-        "distance_km": 25,
-        "car_time": "25-30 мин",
-        "range_group": "25",
-        "is_24_7": 1,
-        "opening_hours": "Круглосуточно 24/7",
-        "night_vibe": data["vibe"],
-        "car_chill": 1,
-        "popularity": "secret",
-        "vibe": data["vibe"],
-        "season": "Круглый год",
-        "time_of_day": "Круглосуточно / Ночь",
-        "car_access": "Свободный подъезд на авто",
-        "photo_tips": "Красивые панорамы",
-        "yandex_map": map_link if map_link.startswith("http") else f"https://yandex.ru/maps/?text={map_link}"
-    }
-    
-    success = db.add_custom_place(new_place)
-    if success:
-        await message.answer(
-            f"🎉 <b>Локация «{data['title']}» успешно добавлена в базу данных!</b>\n\n"
-            "Она сразу стала доступна в ленте рекомендаций.",
-            parse_mode="HTML",
-            reply_markup=get_main_menu_keyboard()
-        )
-    else:
-        await message.answer(
-            "⚠️ Ошибка при сохранении. Попробуйте еще раз позже.",
-            reply_markup=get_main_menu_keyboard()
-        )
-
-
 # ---------------- СТАТИСТИКА И ПРОФИЛЬ ----------------
 
-@dp.message(F.text == "📊 Мой профиль")
+@dp.message(F.text.in_(["📊 Мой профиль", "Мой профиль", "Профиль"]))
 async def user_profile(message: types.Message):
     user_id = message.from_user.id
     stats = db.get_user_stats(user_id)
@@ -749,7 +661,7 @@ async def user_profile(message: types.Message):
 
 # ---------------- СБРОС ИСТОРИИ ----------------
 
-@dp.message(F.text == "🔁 Сбросить всё")
+@dp.message(F.text.in_(["🔁 Сбросить всё", "🔁 Сбросить историю", "Сбросить историю", "Сбросить всё"]))
 async def reset_history_prompt(message: types.Message):
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -829,9 +741,9 @@ async def main():
     print("=" * 60)
     print("[+] Ночной бот атмосферных локаций севера СПб запущен!")
     print("[+] Радиус: строго до 50 км (м. Озерки / Север СПб / ЛО).")
-    print("[+] Фильтр времени (ночной режим 24/7 с открытым въездом).")
+    print("[+] Фильтр времени: Ночной режим 24/7 по умолчанию.")
     print("[+] Отметка «Уже был здесь» и исключение посещенных спотов.")
-    print("[+] Фоновое обновление базы каждые 6 часов активировано.")
+    print("[+] Поддержка старых и новых кнопок клавиатуры.")
     print("=" * 60)
     
     # Запуск фонового health-check сервера
