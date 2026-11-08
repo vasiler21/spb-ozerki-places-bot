@@ -129,10 +129,48 @@ def init_db():
             if col_name not in existing_settings_cols:
                 cursor.execute(f"ALTER TABLE user_settings ADD COLUMN {col_name} {col_def}")
                 
+        # 4. Таблица системных метаданных (время авто-обновления и т.д.)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bot_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         conn.commit()
 
     # Синхронизируем базовые места из каталога и пула открытий
     sync_places_from_catalog()
+
+
+def get_metadata(key: str, default: Optional[str] = None) -> Optional[str]:
+    """Получить значение системного метаданного."""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM bot_metadata WHERE key = ?", (key,))
+            row = cursor.fetchone()
+            return row[0] if row and row[0] is not None else default
+    except Exception:
+        return default
+
+
+def set_metadata(key: str, value: str):
+    """Установить значение системного метаданного."""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO bot_metadata (key, value, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (key, value))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Ошибка сохранения метаданных: {e}")
 
 
 def sync_places_from_catalog() -> int:
@@ -145,7 +183,15 @@ def sync_places_from_catalog() -> int:
     with get_connection() as conn:
         cursor = conn.cursor()
         
-        all_to_sync = list(PLACES) + list(AUTO_DISCOVERY_POOL)
+        from places_updater import load_discovered_places_from_file
+        discovered = load_discovered_places_from_file()
+        
+        seen_keys = set()
+        all_to_sync = []
+        for p in list(PLACES) + list(AUTO_DISCOVERY_POOL) + list(discovered):
+            if p["id"] not in seen_keys:
+                seen_keys.add(p["id"])
+                all_to_sync.append(p)
         
         for p in all_to_sync:
             # Извлекаем lat и lon
@@ -307,10 +353,40 @@ def add_custom_place(place_dict: Dict[str, Any]) -> bool:
             return False
 
 
-def auto_update_and_expand_places() -> Tuple[int, int]:
-    """Делегирует обновление модулю places_updater."""
+def auto_update_and_expand_places(force: bool = False) -> Tuple[int, int, List[str]]:
+    """Делегирует 12-часовой поиск и анализ новых локаций модулю places_updater."""
     import places_updater
-    return places_updater.update_and_expand_places()
+    return places_updater.update_and_expand_places(force=force)
+
+
+def get_discovery_status() -> Dict[str, Any]:
+    """Возвращает информацию о расписании авто-поиска локаций."""
+    from datetime import datetime, timezone
+    last_str = get_metadata("last_discovery_timestamp")
+    last_cnt = get_metadata("last_discovery_count", "0")
+    total = len(get_all_places_from_db())
+    
+    if last_str:
+        try:
+            ts = float(last_str)
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            formatted = dt.strftime("%d.%m %H:%M UTC")
+            now_ts = datetime.now(timezone.utc).timestamp()
+            elapsed_h = (now_ts - ts) / 3600.0
+            next_in_h = max(0.0, 12.0 - elapsed_h)
+        except Exception:
+            formatted = "Недавно"
+            next_in_h = 12.0
+    else:
+        formatted = "Еще не выполнялся"
+        next_in_h = 0.0
+        
+    return {
+        "last_run": formatted,
+        "last_added": int(last_cnt or 0),
+        "next_in_hours": round(next_in_h, 1),
+        "total_places": total
+    }
 
 
 # ---------------- НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ ----------------
