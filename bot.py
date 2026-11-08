@@ -97,7 +97,9 @@ def format_card(place: Dict[str, Any]) -> str:
     
     # Бейдж популярности
     pop = place.get("popularity", "hidden")
-    if place.get("is_custom"):
+    if place.get("is_new") or pop == "new_discovery":
+        badge = " ✨ <b>[Свежее открытие!]</b>"
+    elif place.get("is_custom"):
         badge = " <i>[Добавлено тобой]</i>"
     elif pop == "secret":
         badge = " 🔥 <b>[Секретный спот]</b>"
@@ -811,6 +813,7 @@ async def user_profile(message: types.Message):
     stats = db.get_user_stats(user_id)
     
     fav_pref = stats["top_category"] if stats["top_category"] else "еще формируется"
+    disc_info = db.get_discovery_status()
     
     profile_text = (
         "📊 <b>Твой профиль путешественника:</b>\n\n"
@@ -823,6 +826,7 @@ async def user_profile(message: types.Message):
         f"🕒 <b>Режим атмосферы:</b> {stats['time_filter']}\n"
         f"🌲 <b>Направление:</b> {stats['zone_filter']}\n"
         f"✨ <b>Любимый вайб:</b> {fav_pref}\n\n"
+        f"🔄 <b>Авто-поиск новых мест:</b> каждые ~12 ч (следующий через ~{disc_info['next_in_hours']} ч)\n\n"
         "<i>Используй кнопки ниже для быстрой настройки параметров:</i>"
     )
     
@@ -1014,21 +1018,67 @@ async def process_place_map(message: types.Message, state: FSMContext):
         )
 
 
-# ---------------- ФОНОВОЕ ОБНОВЛЕНИЕ БАЗЫ (КАЖДЫЕ 6 ЧАСОВ) ----------------
+# ---------------- РУЧНОЙ ЗАПУСК ПОИСКА И АНАЛИЗА НОВЫХ МЕСТ ----------------
+
+@dp.message(Command("update_now", "scan"))
+async def manual_update_now(message: types.Message):
+    """Принудительный запуск поиска и анализа новых локаций."""
+    status_msg = await message.answer(
+        "🔍 <b>Запущен интеллектуальный поиск и анализ новых локаций...</b>\n\n"
+        "• Проверка координат и радиуса (до 60 км)\n"
+        "• Фильтрация дубликатов (мин. 600 м от существующих точек)\n"
+        "• Анализ 24/7 доступности и подъезда на авто\n"
+        "• Оценка эстетики (вода, лес, закат, ночные огни)\n\n"
+        "<i>Старые локации и история полностью сохраняются.</i>",
+        parse_mode="HTML"
+    )
+    
+    added, total, titles = db.auto_update_and_expand_places(force=True, batch_limit=3)
+    
+    if added > 0:
+        titles_str = "\n".join(f"• <b>{t}</b>" for t in titles)
+        await status_msg.edit_text(
+            f"🎉 <b>Анализ завершен! Найдено и добавлено {added} новых локаций:</b>\n\n"
+            f"{titles_str}\n\n"
+            f"Всего в активной базе: <b>{total}</b> спотов.\n"
+            "Они уже доступны в общей ленте с отметкой ✨ [Свежее открытие!]!",
+            parse_mode="HTML"
+        )
+    else:
+        await status_msg.edit_text(
+            f"✅ <b>База актуальна (всего {total} проверенных мест)!</b>\n\n"
+            "Все найденные кандидаты уже присутствуют в базе либо отклонены "
+            "(слишком близко к существующим точкам или дальше 60 км). "
+            "Старые места сохранены в неизменном виде.",
+            parse_mode="HTML"
+        )
+
+
+# ---------------- ФОНОВЫЙ ПЛАНИРОВЩИК (КАЖДЫЕ ~12 ЧАСОВ) ----------------
 
 async def background_auto_updater():
-    """Фоновое автоматическое обновление каждые 6 часов (21600 сек)."""
+    """
+    Фоновый планировщик авто-поиска локаций.
+    Проверяет расписание каждые 5 минут и выполняет поиск каждые ~12 часов (±30 мин).
+    Старые локации никогда не удаляются, база защищена от спама.
+    """
+    logger.info("[Фоновый планировщик] Запущен (цикл авто-поиска: каждые ~12 часов).")
+    
+    # Небольшая задержка перед первой проверкой при старте
+    await asyncio.sleep(10)
+    
     while True:
         try:
-            await asyncio.sleep(21600)  # 6 часов
-            added, total = db.auto_update_and_expand_places()
+            added, total, titles = db.auto_update_and_expand_places(force=False, batch_limit=3)
             if added > 0:
-                logger.info(f"[Авто-обновление] Успешно добавлено {added} новых локаций. Всего в базе: {total}")
+                logger.info(f"[Авто-поиск 12ч] Добавлено {added} новых мест: {titles}. Всего в базе: {total}")
+            # Проверяем каждые 5 минут
+            await asyncio.sleep(300)
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.error(f"[Авто-обновление] Ошибка: {e}")
-            await asyncio.sleep(3600)
+            logger.error(f"[Фоновый планировщик] Ошибка: {e}")
+            await asyncio.sleep(600)
 
 
 async def start_health_check_server():
