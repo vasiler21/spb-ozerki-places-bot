@@ -4,7 +4,7 @@
 Включает:
 - Управление местами, миграцию схемы и синхронизацию.
 - Реакции пользователя: 'liked' (избранное), 'skipped' (пропуск), 'visited' (я здесь был).
-- Фильтры пользователя: дистанция (строго до 50 км), время суток (24/7 ночные), зона (север СПб и ЛО).
+- Фильтры пользователя: дистанция (строго до 50 км), время суток (по умолчанию: 24/7 ночные), зона (север СПб и ЛО).
 - Умный алгоритм подбора мест с приоритизацией секретных спотов и ночного чилла.
 """
 
@@ -54,7 +54,7 @@ def init_db():
             )
         """)
         
-        # Миграция: проверяем и добавляем новые колонки в places, если база уже существовала
+        # Миграция колонок для places
         cursor.execute("PRAGMA table_info(places)")
         existing_cols = {col[1] for col in cursor.fetchall()}
         
@@ -81,12 +81,12 @@ def init_db():
             )
         """)
         
-        # 3. Таблица настроек пользователя
+        # 3. Таблица настроек пользователя (ночной фильтр по умолчанию включен!)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_settings (
                 user_id INTEGER PRIMARY KEY,
                 distance_filter TEXT DEFAULT '50',
-                time_filter TEXT DEFAULT 'all',
+                time_filter TEXT DEFAULT 'night',
                 zone_filter TEXT DEFAULT 'all_north',
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -97,32 +97,32 @@ def init_db():
         existing_settings_cols = {col[1] for col in cursor.fetchall()}
         
         settings_to_add = [
-            ("time_filter", "TEXT DEFAULT 'all'"),
+            ("time_filter", "TEXT DEFAULT 'night'"),
             ("zone_filter", "TEXT DEFAULT 'all_north'")
         ]
         for col_name, col_def in settings_to_add:
             if col_name not in existing_settings_cols:
                 cursor.execute(f"ALTER TABLE user_settings ADD COLUMN {col_name} {col_def}")
                 
-        # 4. Удаляем старые нерелевантные локации с расстоянием > 50 км по просьбе пользователя
+        # 4. Удаляем старые нерелевантные локации с расстоянием > 50 км
         cursor.execute("DELETE FROM places WHERE distance_km > 50")
         
         conn.commit()
 
-    # Синхронизируем базовые места из каталога
+    # Синхронизируем базовые места из каталога и пула открытий
     sync_places_from_catalog()
 
 
 def sync_places_from_catalog() -> int:
     """
-    Синхронизирует локации из places_data.py в таблицу places.
-    Обновляет описание и флаги доступности для существующих записей и добавляет новые.
+    Синхронизирует локации из places_data.py и пула открытий в таблицу places.
     """
     added_count = 0
     with get_connection() as conn:
         cursor = conn.cursor()
+        
+        # 1. Загрузка из PLACES
         for p in PLACES:
-            # Обновляем или добавляем запись
             cursor.execute("""
                 INSERT INTO places (
                     id, title, category, zone, distance_km, car_time, range_group,
@@ -266,14 +266,13 @@ def get_user_distance_filter(user_id: int) -> str:
         cursor.execute("SELECT distance_filter FROM user_settings WHERE user_id = ?", (user_id,))
         row = cursor.fetchone()
         val = row[0] if row and row[0] else "50"
-        # Если старое значение было "all", "80", "100+", заменяем на 50 км
         if val in ("all", "80", "100+"):
             val = "50"
         return val
 
 
 def set_user_time_filter(user_id: int, time_filter: str):
-    """Установить фильтр по времени суток: 'all', 'night', 'sunset', 'day'."""
+    """Установить фильтр по времени суток: 'night', 'sunset', 'day', 'all'."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -287,12 +286,12 @@ def set_user_time_filter(user_id: int, time_filter: str):
 
 
 def get_user_time_filter(user_id: int) -> str:
-    """Получить текущий фильтр времени суток (по умолчанию 'all')."""
+    """Получить текущий фильтр времени суток (по умолчанию: 'night' для ночных спотов 24/7)."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT time_filter FROM user_settings WHERE user_id = ?", (user_id,))
         row = cursor.fetchone()
-        return row[0] if row and row[0] else "all"
+        return row[0] if row and row[0] else "night"
 
 
 def set_user_zone_filter(user_id: int, zone_filter: str):
@@ -448,8 +447,8 @@ def get_user_stats(user_id: int) -> Dict[str, Any]:
         "total_available": total_available,
         "top_category": top_cat,
         "dist_filter": DISTANCE_GROUPS.get(dist_filter, f"До {dist_filter} км"),
-        "time_filter": TIME_FILTERS.get(time_filter, "Любое время"),
-        "zone_filter": ZONE_NAMES.get(zone_filter, "Весь Север")
+        "time_filter": TIME_FILTERS.get(time_filter, "Ночные споты 24/7"),
+        "zone_filter": ZONE_NAMES.get(zone_filter, "Весь Север СПб и ЛО")
     }
 
 
@@ -460,9 +459,9 @@ def get_next_smart_place(user_id: int) -> Optional[Dict[str, Any]]:
     Интеллектуальный подбор следующей локации:
     1. Исключает просмотренные (лайкнутые, пропущенные И отмеченные как 'visited' - «Был здесь»).
     2. Строго соблюдает числовой фильтр расстояния: distance_km <= max_km (строго <= 50 км!).
-    3. При фильтре 'night' выбирает ТОЛЬКО круглосуточные места (is_24_7 == 1) с открытым въездом!
+    3. При фильтре 'night' (по умолчанию) выбирает ТОЛЬКО круглосуточные места (is_24_7 == 1) с открытым въездом!
     4. Учитывает выбранную географическую зону севера СПб и области.
-    5. Ранжирует в пользу небанальных/секретных точек (popularity: 'secret', 'hidden') и авто-чилла.
+    5. Ранжирует в пользу секретных точек (popularity: 'secret', 'hidden') и комфортного авто-чилла (car_chill == 1).
     """
     with get_connection() as conn:
         conn.row_factory = sqlite3.Row
@@ -514,26 +513,32 @@ def get_next_smart_place(user_id: int) -> Optional[Dict[str, Any]]:
     if not candidates:
         return None
         
-    # 5. Умное ранжирование
+    # 5. Умное ранжирование (приоритет авто-чиллу и секретным точкам)
     def score_place(place: Dict[str, Any]) -> float:
         score = 10.0
         
-        # Приоритет секретным и небанальным спотам (пользователь уже был во многих классических)
+        # Огромный приоритет секретным и небанальным спотам
         pop = place.get("popularity", "hidden")
         if pop == "secret":
-            score += 15.0
+            score += 25.0
         elif pop == "hidden":
-            score += 8.0
+            score += 15.0
             
-        # Бонус за возможность комфортного авто-чилла (постоять в машине/покурить/вид)
+        # Огромный приоритет авто-чиллу (постоять в машине, вид, покурить)
         if place.get("car_chill", 0) == 1:
-            score += 6.0
+            score += 20.0
             
-        # Бонус за любимые категории
+        # Категории ночного чилла и смотровых
+        if place.get("category") == "night_chill":
+            score += 18.0
+        elif place.get("category") == "viewpoint":
+            score += 12.0
+            
+        # Бонус за любимые категории пользователя
         score += cat_likes.get(place.get("category", ""), 0) * 3.0
         
-        # Случайный фактор для разнообразия выборки
-        score *= random.uniform(0.85, 1.25)
+        # Небольшая вариативность
+        score *= random.uniform(0.9, 1.15)
         return score
 
     candidates.sort(key=score_place, reverse=True)
