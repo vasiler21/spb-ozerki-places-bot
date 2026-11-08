@@ -1,22 +1,21 @@
 # -*- coding: utf-8 -*-
 """
 Telegram-бот для поиска атмосферных мест севера СПб и Ленинградской области.
-Старт: м. Озерки (Выборгское / Приморское шоссе, Скандинавия, Сортавала, КАД).
-Радиус: настраиваемый (20, 30, 40, 50, до 60 км).
-Особенности:
-- Огромная база (100+ спотов) с фокусом на ночные локации 24/7.
-- Автоматическое фоновое обновление и поиск новых мест каждые 6 часов.
-- Выбор дистанции: 20 км -> 30 км -> 40 км -> 50 км -> до 60 км.
-- Спец-описание для ночного чилла: вид из машины, где постоять, покурить, отдохнуть.
-- Выбор зон: Курортный р-н, Дамба, Токсово/озера, Север СПб, Ладога.
-- Отметка «✅ Уже был здесь» (навсегда исключает место из показа).
+Поддерживает:
+- Выбор точки старта (станции метро СПб: Озерки, Гражданский пр., Парнас, Беговая и др. или GPS-геолокация).
+- Динамический расчет точного расстояния, времени в пути на авто и маршрута в Яндекс.Картах от выбранного метро.
+- Фильтр расстояния: 20 км, 30 км, 40 км, 50 км, до 60 км.
+- Подбор мест под время суток и атмосферу (Ночь, Вечер/закат, День, Утро/рассвет) с проверкой ночной доступности 24/7.
+- Компактное и интуитивно понятное меню.
+- Отметки «Уже был здесь» и «Избранное».
+- Моментальный отклик без задержек.
 """
 
 import os
 import sys
 import logging
 import asyncio
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 # Настройка кодировки для Windows
 if sys.platform == "win32":
@@ -39,13 +38,16 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiohttp import web
 
-from places_data import CATEGORY_NAMES, ZONE_NAMES, DISTANCE_GROUPS, TIME_FILTERS
+from places_data import (
+    CATEGORY_NAMES, ZONE_NAMES, DISTANCE_GROUPS, TIME_FILTERS,
+    METRO_STATIONS, DEFAULT_METRO_ID, find_nearest_metro
+)
 import db
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Инициализация базы данных
+# Инициализация базы данных и кеша
 db.init_db()
 
 # Получение токена
@@ -63,7 +65,7 @@ bot = Bot(token=TOKEN) if TOKEN and TOKEN != "YOUR_TELEGRAM_BOT_TOKEN_HERE" else
 dp = Dispatcher()
 
 
-# FSM для добавления собственного места
+# FSM для добавления собственного места (сохранено для будущих планов)
 class AddPlaceForm(StatesGroup):
     waiting_title = State()
     waiting_vibe = State()
@@ -71,21 +73,27 @@ class AddPlaceForm(StatesGroup):
 
 
 def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
-    """Главная компактная клавиатура бота (без лишней кнопки обновления, бот обновляется сам в фоне)."""
+    """
+    Компактная и интуитивно понятная главная клавиатура.
+    Кнопки короткие, аккуратные и понятные.
+    """
     kb = [
-        [KeyboardButton(text="🧭 Смотреть локации")],
-        [KeyboardButton(text="🌙 Ночной фильтр (24/7)"), KeyboardButton(text="📏 Дистанция (до 60 км)")],
-        [KeyboardButton(text="📍 Выбор зоны"), KeyboardButton(text="✅ Где я был")],
-        [KeyboardButton(text="⭐ Избранное"), KeyboardButton(text="📊 Мой профиль")],
-        [KeyboardButton(text="➕ Добавить место"), KeyboardButton(text="🔁 Сбросить всё")]
+        [KeyboardButton(text="🧭 Смотреть места")],
+        [KeyboardButton(text="📍 Точка старта"), KeyboardButton(text="📏 Дистанция")],
+        [KeyboardButton(text="🕒 Время и вайб"), KeyboardButton(text="🌲 Направление")],
+        [KeyboardButton(text="⭐ Избранное"), KeyboardButton(text="✅ Где я был")],
+        [KeyboardButton(text="📊 Профиль"), KeyboardButton(text="🔁 Сброс")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 
 def format_card(place: Dict[str, Any]) -> str:
-    """Красивая карточка с акцентом на ночной чилл, координаты и доступность 24/7."""
+    """Красивая карточка спота с динамическим расчетом от выбранной точки старта."""
     cat_emoji = CATEGORY_NAMES.get(place.get("category", ""), "📍")
     zone_name = ZONE_NAMES.get(place.get("zone", ""), "Север СПб и ЛО")
+    start_name = place.get("start_name", "м. Озерки")
+    dist_km = place.get("distance_km", 25)
+    car_time = place.get("car_time", "~25 мин")
     
     # Бейдж популярности
     pop = place.get("popularity", "hidden")
@@ -102,21 +110,21 @@ def format_card(place: Dict[str, Any]) -> str:
     if place.get("is_24_7", 1):
         access_badge = "🟢 <b>ВЪЕЗД:</b> Круглосуточно 24/7 (въезд открыт, шлагбаумов нет)"
     else:
-        access_badge = f"🔴 <b>ВЪЕЗД:</b> {place.get('opening_hours', 'Только днем')} (ночью закрыто!)"
+        access_badge = f"🟡 <b>ВЪЕЗД:</b> {place.get('opening_hours', 'Только днем')} (ночью закрыто!)"
 
     # Описание ночного чилла
     night_block = ""
     if place.get("night_vibe"):
         car_icon = "🚗 " if place.get("car_chill") else "🚶‍♂️ "
         night_block = (
-            f"\n\n🌙 <b>Ночной вайб (чилл / покурить / вид):</b>\n"
+            f"\n\n🌙 <b>Ночной вайб (чилл / вид / у капота):</b>\n"
             f"{car_icon}{place['night_vibe']}"
         )
 
     text = (
         f"<b>{place['title']}</b>{badge}\n"
         f"<i>{cat_emoji} • 📍 {zone_name}</i>\n\n"
-        f"⏱ <b>От м. Озерки:</b> ~{place['distance_km']} км ({place['car_time']})\n"
+        f"⏱ <b>От {start_name}:</b> ~{dist_km} км ({car_time})\n"
         f"{access_badge}\n\n"
         f"✨ <b>Вайб и атмосфера:</b>\n{place['vibe']}"
         f"{night_block}\n\n"
@@ -127,14 +135,14 @@ def format_card(place: Dict[str, Any]) -> str:
 
 
 def get_swipe_keyboard(place_id: str, yandex_map_url: str) -> InlineKeyboardMarkup:
-    """Инлайн-кнопки карточки: Like, Skip, Visited, Route."""
+    """Компактные инлайн-кнопки карточки."""
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="❤️ В избранное", callback_data=f"like_{place_id}"),
         InlineKeyboardButton(text="➡️ Пропустить", callback_data=f"skip_{place_id}")
     )
     builder.row(
-        InlineKeyboardButton(text="✅ Уже был здесь (больше не показывать)", callback_data=f"visited_{place_id}")
+        InlineKeyboardButton(text="✅ Уже был здесь", callback_data=f"visited_{place_id}")
     )
     builder.row(
         InlineKeyboardButton(text="🗺 Маршрут в Яндекс.Картах", url=yandex_map_url)
@@ -147,53 +155,46 @@ def get_swipe_keyboard(place_id: str, yandex_map_url: str) -> InlineKeyboardMark
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
-    dist_val = db.get_user_distance_filter(user_id)
-    dist_name = DISTANCE_GROUPS.get(dist_val, f"До {dist_val} км")
-    time_val = db.get_user_time_filter(user_id)
-    time_name = TIME_FILTERS.get(time_val, "Ночные споты 24/7")
-    zone_val = db.get_user_zone_filter(user_id)
-    zone_name = ZONE_NAMES.get(zone_val, "Весь Север СПб и ЛО")
+    stats = db.get_user_stats(user_id)
     
     greeting = (
-        "👋 <b>Гид по ночным и атмосферным спотам севера СПб и ЛО готов!</b>\n\n"
-        "📍 <b>Точка старта: м. «Озерки»</b> (Выборгское/Приморское ш., «Скандинавия», «Сортавала», КАД и Дамба).\n"
-        "🗺 В каталоге собрано <b>более 100 проверенных локаций</b>.\n\n"
-        "🌙 <b>Что настроено для ночных поездок:</b>\n"
-        "• <b>Ночной фильтр 24/7 по умолчанию:</b> бот сразу выдает только места со свободным въездом на машине без ворот и шлагбаумов.\n"
-        "• <b>Авто-чилл:</b> подробное описание, где встать на машине, какой вид на воду/огни и можно ли постоять у капота с кофе или покурить.\n"
-        "• <b>Выбор дистанции:</b> шаг 20 км -> 30 км -> 40 км -> 50 км -> до 60 км.\n"
-        "• <b>Кнопка «✅ Уже был здесь»:</b> жми на знакомых местах, и бот навсегда скроет их из ленты.\n"
-        "• <b>Авто-обновление:</b> база сама обновляется и пополняется каждые 6 часов в фоновом режиме.\n\n"
-        f"🎯 <b>Текущие настройки:</b>\n"
-        f"• Режим: <b>{time_name}</b>\n"
-        f"• Дистанция: <b>{dist_name}</b>\n"
-        f"• Направление: <b>{zone_name}</b>\n\n"
-        "Жми <b>«🧭 Смотреть локации»</b>, чтобы начать выбор спота!"
+        "👋 <b>Гид по атмосферным спотам СПб и Ленинградской области готов!</b>\n\n"
+        f"📍 <b>Точка отсчета:</b> {stats['start_name']}\n"
+        "<i>(Можно сменить в меню «📍 Точка старта» на Гражданский пр., Просвещения, Беговую или по GPS)</i>\n\n"
+        "🎯 <b>Текущие настройки поиска:</b>\n"
+        f"• Старт: <b>{stats['start_name']}</b>\n"
+        f"• Дистанция: <b>{stats['dist_filter']}</b>\n"
+        f"• Время и вайб: <b>{stats['time_filter']}</b>\n"
+        f"• Направление: <b>{stats['zone_filter']}</b>\n\n"
+        "💡 <b>Как это работает:</b>\n"
+        "• Бот сам рассчитывает точное расстояние, время на авто и строит маршрут в Яндекс.Картах прямо от твоего метро.\n"
+        "• Подбирает места, которые красивее всего именно в выбранное время (ночью — свободный въезд 24/7 и вид на огни, вечером — закат на заливе, днем — экотропы).\n"
+        "• Жми «✅ Уже был здесь», чтобы исключить знакомые точки.\n\n"
+        "Жми <b>«🧭 Смотреть места»</b>, чтобы начать!"
     )
     await message.answer(greeting, parse_mode="HTML", reply_markup=get_main_menu_keyboard())
 
 
 # Обработка просмотра локаций
-@dp.message(F.text.in_(["🧭 Смотреть локации", "Смотреть локации", "🧭 Найти ночной спот (до 60 км)", "🧭 Найти ночной спот (до 50 км)"]))
+@dp.message(F.text.in_([
+    "🧭 Смотреть места", "Смотреть места",
+    "🧭 Смотреть локации", "Смотреть локации",
+    "🧭 Найти ночной спот (до 60 км)", "🧭 Найти ночной спот (до 50 км)"
+]))
 async def show_feed(message: types.Message):
     """Показать следующую подходящую локацию."""
     user_id = message.from_user.id
     next_place = db.get_next_smart_place(user_id)
     
     if not next_place:
-        dist_val = db.get_user_distance_filter(user_id)
-        dist_name = DISTANCE_GROUPS.get(dist_val, f"до {dist_val} км")
-        time_val = db.get_user_time_filter(user_id)
-        time_name = TIME_FILTERS.get(time_val, "выбранном режиме")
-        
+        stats = db.get_user_stats(user_id)
         await message.answer(
-            f"🎉 <b>Ты просмотрел все доступные споты ({dist_name}, {time_name})!</b>\n\n"
+            f"🎉 <b>Ты просмотрел все доступные споты ({stats['dist_filter']}, {stats['time_filter']})!</b>\n\n"
             "Что можно сделать прямо сейчас:\n"
-            "1. Увеличить радиус в <b>«📏 Дистанция»</b> (например, выбрать до 40, 50 или 60 км).\n"
-            "2. Сменить <b>«📍 Зону»</b> или <b>«🌙 Ночной фильтр»</b> (например, посмотреть закатные споты).\n"
-            "3. Заглянуть в <b>«✅ Где я был»</b> или <b>«⭐ Избранное»</b>.\n"
-            "4. Нажать <b>«🔁 Сбросить всё»</b>, чтобы пролистать базу заново.\n\n"
-            "<i>База автоматически пополняется новыми точками каждые 6 часов.</i>",
+            "1. Увеличить радиус в <b>«📏 Дистанция»</b> (до 40, 50 или 60 км).\n"
+            "2. Сменить атмосферу в <b>«🕒 Время и вайб»</b> (например, посмотреть вечерние закаты или дневные экотропы).\n"
+            "3. Сменить точку в <b>«📍 Точка старта»</b> (например, выбрать м. Гражданский проспект).\n"
+            "4. Нажать <b>«🔁 Сброс»</b>, чтобы пролистать базу заново.",
             parse_mode="HTML",
             reply_markup=get_main_menu_keyboard()
         )
@@ -219,7 +220,7 @@ async def handle_like(callback: types.CallbackQuery):
         await callback.message.edit_text(
             "🎉 <b>Все локации в выбранном фильтре просмотрены!</b>\n\n"
             "Все сохраненные маршруты ждут тебя во вкладке <b>«⭐ Избранное»</b>.\n"
-            "Попробуй увеличить радиус дистанции или сменить зону!",
+            "Попробуй увеличить радиус дистанции или сменить фильтр времени!",
             parse_mode="HTML"
         )
         return
@@ -241,7 +242,7 @@ async def handle_skip(callback: types.CallbackQuery):
     if not next_place:
         await callback.message.edit_text(
             "🎉 <b>Ты просмотрел все локации в этом фильтре!</b>\n\n"
-            "Попробуй выбрать больший радиус (например, до 50 или 60 км) в меню <b>«📏 Дистанция»</b>.",
+            "Попробуй выбрать больший радиус в меню <b>«📏 Дистанция»</b> или сменить атмосферу.",
             parse_mode="HTML"
         )
         return
@@ -258,7 +259,7 @@ async def handle_visited(callback: types.CallbackQuery):
     place_id = callback.data.split("_", 1)[1]
     
     db.record_reaction(user_id, place_id, "visited")
-    await callback.answer("✅ Отмечено: «Был здесь»! Место скрыто из ленты.", show_alert=False)
+    await callback.answer("✅ Отмечено: «Был здесь»! Скрыто из ленты.", show_alert=False)
     
     next_place = db.get_next_smart_place(user_id)
     if not next_place:
@@ -275,109 +276,172 @@ async def handle_visited(callback: types.CallbackQuery):
     await callback.message.edit_text(card_text, parse_mode="HTML", reply_markup=kb)
 
 
-# ---------------- РАЗДЕЛ: ГДЕ Я БЫЛ ----------------
+# ---------------- ВЫБОР ТОЧКИ СТАРТА (МЕТРО / GPS) ----------------
 
-@dp.message(F.text.in_(["✅ Где я был", "Где я был", "Посещенные места"]))
-async def show_visited_places(message: types.Message):
+@dp.message(F.text.in_([
+    "📍 Точка старта", "Точка старта",
+    "Выбор метро", "Метро", "Точка выбора", "Откуда считать"
+]))
+async def select_start_point_menu(message: types.Message):
     user_id = message.from_user.id
-    visited = db.get_user_visited(user_id)
+    start_pt = db.get_user_start_point(user_id)
     
-    if not visited:
-        await message.answer(
-            "✅ <b>Список посещенных мест пока пуст!</b>\n\n"
-            "Когда листаешь споты (<b>«🧭 Смотреть локации»</b>), "
-            "нажимай <b>«✅ Уже был здесь (больше не показывать)»</b> на знакомых точках. "
-            "Бот запомнит их и больше не станет предлагать в ленте.",
-            parse_mode="HTML",
-            reply_markup=get_main_menu_keyboard()
-        )
-        return
-        
     builder = InlineKeyboardBuilder()
-    for place in visited:
-        btn_text = f"✅ {place['title']} (~{place['distance_km']} км)"
-        builder.row(InlineKeyboardButton(text=btn_text, callback_data=f"vis_view_{place['id']}"))
+    
+    # Станции метро попарно в ряду
+    metro_keys = list(METRO_STATIONS.keys())
+    for i in range(0, len(metro_keys), 2):
+        row_btns = []
+        for k in metro_keys[i:i+2]:
+            m = METRO_STATIONS[k]
+            mark = "✅ " if k == start_pt.get("id") else ""
+            btn_text = f"{mark}{m['short_name']}"
+            row_btns.append(InlineKeyboardButton(text=btn_text, callback_data=f"set_metro_{k}"))
+        builder.row(*row_btns)
         
     await message.answer(
-        f"✅ <b>Места, где ты уже побывал ({len(visited)}):</b>\n"
-        "Они исключены из ленты рекомендаций. Нажми, чтобы открыть карточку или вернуть место в ленту:",
+        f"📍 <b>Откуда считаем расстояние и маршруты?</b>\n\n"
+        f"Текущая точка старта: <b>{start_pt['name']}</b> ({start_pt.get('hint', '')})\n\n"
+        "Выбери ближайшую станцию метро ниже или просто <b>отправь свою геопозицию в чат</b> 📎, "
+        "и бот сам определит ближайшее метро:",
         parse_mode="HTML",
         reply_markup=builder.as_markup()
     )
 
 
-@dp.callback_query(F.data.startswith("vis_view_"))
-async def view_visited_place(callback: types.CallbackQuery):
-    place_id = callback.data.split("_", 2)[2]
-    place = db.get_place_by_id(place_id)
-    
-    if not place:
-        await callback.answer("Локация не найдена!", show_alert=True)
-        return
-        
-    card_text = format_card(place)
-    
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="🗺 Маршрут в Яндекс.Картах", url=place["yandex_map"]))
-    builder.row(InlineKeyboardButton(text="❌ Вернуть место в ленту рекомендаций", callback_data=f"vis_del_{place['id']}"))
-    builder.row(InlineKeyboardButton(text="⬅️ Назад к списку посещенных", callback_data="vis_back_list"))
-    
-    await callback.message.edit_text(card_text, parse_mode="HTML", reply_markup=builder.as_markup())
-
-
-@dp.callback_query(F.data.startswith("vis_del_"))
-async def delete_visited_mark(callback: types.CallbackQuery):
+@dp.callback_query(F.data.startswith("set_metro_"))
+async def save_start_metro(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    place_id = callback.data.split("_", 2)[2]
+    metro_id = callback.data.split("_", 2)[2]
     
-    db.remove_visited(user_id, place_id)
-    await callback.answer("Отметка снята! Место снова может появиться в ленте.", show_alert=True)
+    db.set_user_start_metro(user_id, metro_id)
+    metro_info = METRO_STATIONS.get(metro_id, METRO_STATIONS[DEFAULT_METRO_ID])
     
-    visited = db.get_user_visited(user_id)
-    if not visited:
-        await callback.message.edit_text(
-            "✅ <b>В списке посещенных больше ничего нет.</b>\n"
-            "Все точки снова доступны к показу в ленте!",
-            parse_mode="HTML"
-        )
-        return
-        
+    await callback.answer(f"Точка старта: {metro_info['name']}", show_alert=False)
+    
     builder = InlineKeyboardBuilder()
-    for place in visited:
-        btn_text = f"✅ {place['title']} (~{place['distance_km']} км)"
-        builder.row(InlineKeyboardButton(text=btn_text, callback_data=f"vis_view_{place['id']}"))
+    builder.row(InlineKeyboardButton(text="🧭 Смотреть места", callback_data="open_feed_direct"))
+    builder.row(InlineKeyboardButton(text="📍 Сменить метро", callback_data="reopen_start_point"))
+    
+    await callback.message.edit_text(
+        f"✅ <b>Точка старта обновлена: {metro_info['name']}!</b>\n\n"
+        f"• <i>{metro_info['hint']}</i>\n\n"
+        "Теперь все расстояния в км, время в пути на авто и маршруты в Яндекс.Картах "
+        "будут рассчитываться прямо отсюда.\n\n"
+        "Жми кнопку ниже, чтобы продолжить просмотр:",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
+
+
+@dp.callback_query(F.data == "reopen_start_point")
+async def reopen_start_point_callback(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    start_pt = db.get_user_start_point(user_id)
+    
+    builder = InlineKeyboardBuilder()
+    metro_keys = list(METRO_STATIONS.keys())
+    for i in range(0, len(metro_keys), 2):
+        row_btns = []
+        for k in metro_keys[i:i+2]:
+            m = METRO_STATIONS[k]
+            mark = "✅ " if k == start_pt.get("id") else ""
+            btn_text = f"{mark}{m['short_name']}"
+            row_btns.append(InlineKeyboardButton(text=btn_text, callback_data=f"set_metro_{k}"))
+        builder.row(*row_btns)
         
     await callback.message.edit_text(
-        f"✅ <b>Места, где ты уже побывал ({len(visited)}):</b>",
+        f"📍 <b>Выбери станцию метро для отсчета:</b>\n"
+        f"Текущая точка: <b>{start_pt['name']}</b>",
         parse_mode="HTML",
         reply_markup=builder.as_markup()
     )
 
 
-@dp.callback_query(F.data == "vis_back_list")
-async def back_to_visited_list(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    visited = db.get_user_visited(user_id)
+# Обработка отправки геопозиции
+@dp.message(F.location)
+async def handle_user_location(message: types.Message):
+    """Пользователь отправил геопозицию: находим ближайшее метро."""
+    user_id = message.from_user.id
+    lat = message.location.latitude
+    lon = message.location.longitude
     
-    if not visited:
-        await callback.message.edit_text("✅ Список посещенных мест пуст.", parse_mode="HTML")
-        return
-        
+    nearest_id, nearest_metro, dist_km = find_nearest_metro(lat, lon)
+    db.set_user_start_metro(user_id, nearest_id)
+    
     builder = InlineKeyboardBuilder()
-    for place in visited:
-        btn_text = f"✅ {place['title']} (~{place['distance_km']} км)"
-        builder.row(InlineKeyboardButton(text=btn_text, callback_data=f"vis_view_{place['id']}"))
-        
-    await callback.message.edit_text(
-        f"✅ <b>Места, где ты уже побывал ({len(visited)}):</b>",
+    builder.row(InlineKeyboardButton(text="🧭 Смотреть места", callback_data="open_feed_direct"))
+    builder.row(InlineKeyboardButton(text="📍 Выбрать другое метро", callback_data="reopen_start_point"))
+    
+    await message.answer(
+        f"🎯 <b>Геопозиция успешно определена!</b>\n\n"
+        f"Ближайшая станция к тебе: <b>{nearest_metro['name']}</b> (~{dist_km} км).\n"
+        f"Она установлена как твоя точка старта для расчета расстояний и навигации!\n\n"
+        "Жми <b>«🧭 Смотреть места»</b>, чтобы искать споты рядом с тобой:",
         parse_mode="HTML",
         reply_markup=builder.as_markup()
     )
 
 
-# ---------------- ФИЛЬТР ПО ВРЕМЕНИ / НОЧНЫЕ МЕСТА ----------------
+# ---------------- ФИЛЬТР РАССТОЯНИЯ ----------------
 
-@dp.message(F.text.in_(["🌙 Ночной фильтр (24/7)", "🌙 Ночной фильтр", "Ночной фильтр", "Ночные места"]))
+@dp.message(F.text.in_([
+    "📏 Дистанция", "Дистанция",
+    "📏 Дистанция (до 60 км)", "📏 Дистанция (до 50 км)",
+    "Фильтр расстояния", "Радиус"
+]))
+async def change_distance_filter(message: types.Message):
+    user_id = message.from_user.id
+    current_dist = db.get_user_distance_filter(user_id)
+    start_pt = db.get_user_start_point(user_id)
+    
+    builder = InlineKeyboardBuilder()
+    for key, label in DISTANCE_GROUPS.items():
+        mark = "✅ " if key == current_dist else ""
+        builder.row(InlineKeyboardButton(text=f"{mark}{label}", callback_data=f"set_dist_{key}"))
+        
+    await message.answer(
+        f"📏 <b>Выбери максимальную дистанцию (от {start_pt['name']}):</b>\n\n"
+        "• <b>До 20 км</b> — быстрый спот на 15–25 минут\n"
+        "• <b>До 30 км</b> — ближний пригород и озера (~30 мин)\n"
+        "• <b>До 40 км</b> — побережье, Дамба и холмы (~40 мин)\n"
+        "• <b>До 50 км</b> — дальний берег и Ладога (~50 мин)\n"
+        "• <b>До 60 км</b> — максимальный выезд (~1 час)",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
+
+
+@dp.callback_query(F.data.startswith("set_dist_"))
+async def save_distance_filter(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    key = callback.data.split("_", 2)[2]
+    
+    db.set_user_distance_filter(user_id, key)
+    dist_name = DISTANCE_GROUPS.get(key, f"До {key} км")
+    start_pt = db.get_user_start_point(user_id)
+    
+    await callback.answer(f"Дистанция: {dist_name}", show_alert=False)
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🧭 Смотреть места", callback_data="open_feed_direct"))
+    
+    await callback.message.edit_text(
+        f"✅ <b>Установлен радиус:</b> {dist_name}\n"
+        f"Точка отсчета: <b>{start_pt['name']}</b>.\n\n"
+        "Локации дальше этой дистанции показываться не будут.",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
+
+
+# ---------------- ФИЛЬТР: ВРЕМЯ И ВАЙБ (ПОДБОР ПО КРАСОТЕ И ДОСТУПНОСТИ) ----------------
+
+@dp.message(F.text.in_([
+    "🕒 Время и вайб", "Время и вайб",
+    "🌙 Ночной фильтр (24/7)", "🌙 Ночной фильтр", "Ночной фильтр",
+    "Время суток", "Выбор времени"
+]))
 async def select_time_filter(message: types.Message):
     user_id = message.from_user.id
     current_filter = db.get_user_time_filter(user_id)
@@ -388,12 +452,15 @@ async def select_time_filter(message: types.Message):
         builder.row(InlineKeyboardButton(text=f"{mark}{label}", callback_data=f"set_time_{key}"))
         
     await message.answer(
-        "🌙 <b>Выбор фильтра по времени суток и доступности:</b>\n\n"
-        "• <b>🌙 Ночные споты 24/7</b> (по умолчанию): только места со свободным круглосуточным въездом "
-        "(без заборов, шлагбаумов и закрытых ворот) — где можно встать на машине, постоять, покурить и отдохнуть.\n"
-        "• <b>🌅 Закат и вечер</b>: видовые точки у воды и на возвышенностях.\n"
-        "• <b>☀️ Дневные</b>: парки, экотропы и прогулки.\n"
-        "• <b>🌐 Любое время</b>: все доступные локации.",
+        "🕒 <b>Выбери атмосферу и время поездки:</b>\n\n"
+        "Бот подбирает локации, которые <b>особенно красивы именно в это время</b>, "
+        "и обязательно проверяет их доступность:\n\n"
+        "• 🌙 <b>Ночь</b> — вид на огни ночного города, Лахта-Центр, звездное небо над водой, "
+        "авто-чилл у капота и <b>строго круглосуточный свободный въезд 24/7</b> (без закрытых ворот и шлагбаумов).\n"
+        "• 🌅 <b>Вечер и закат</b> — золотой час, закатные панорамы Финского залива и озер.\n"
+        "• ☀️ <b>День</b> — сосновые экотропы, песчаные карьеры, форты и прогулки.\n"
+        "• 🌄 <b>Утро и рассвет</b> — зеркальная гладь озер в тумане, восход солнца над Ладогой, тишина без людей.\n"
+        "• 🌐 <b>Любое время</b> — весь каталог без ограничений.",
         parse_mode="HTML",
         reply_markup=builder.as_markup()
     )
@@ -407,59 +474,25 @@ async def save_time_filter(callback: types.CallbackQuery):
     db.set_user_time_filter(user_id, key)
     time_name = TIME_FILTERS.get(key, "Любое время")
     
-    await callback.answer(f"Режим обновлен: {time_name}", show_alert=False)
-    await callback.message.edit_text(
-        f"✅ <b>Установлен фильтр времени:</b> {time_name}\n\n"
-        "Теперь нажми <b>«🧭 Смотреть локации»</b>, чтобы продолжить поиск!",
-        parse_mode="HTML"
-    )
-
-
-# ---------------- ФИЛЬТР РАССТОЯНИЯ (С ШАГОМ 20, 30, 40, 50, ДО 60 КМ) ----------------
-
-@dp.message(F.text.in_(["📏 Дистанция (до 60 км)", "📏 Дистанция (до 50 км)", "📏 Фильтр расстояния", "Фильтр расстояния", "📏 Дистанция", "Дистанция"]))
-async def change_distance_filter(message: types.Message):
-    user_id = message.from_user.id
-    current_filter = db.get_user_distance_filter(user_id)
+    await callback.answer(f"Режим: {time_name}", show_alert=False)
     
     builder = InlineKeyboardBuilder()
-    for key, label in DISTANCE_GROUPS.items():
-        mark = "✅ " if key == current_filter else ""
-        builder.row(InlineKeyboardButton(text=f"{mark}{label}", callback_data=f"set_dist_{key}"))
-        
-    await message.answer(
-        "📏 <b>Выбери максимальный радиус поездки от м. «Озерки»:</b>\n\n"
-        "Выбирай комфортную для себя дальность:\n"
-        "• <b>До 20 км</b> — быстрый выезд на 15–25 минут (Шувалово, Озерки, Юкки, Лисий Нос, Сертолово)\n"
-        "• <b>До 30 км</b> — ближний Курортный и озера (Сестрорецк, Разлив, Медное озеро, Токсово)\n"
-        "• <b>До 40 км</b> — побережье и Дамба (Репино, Комарово, Северная Дамба, Лемболово)\n"
-        "• <b>До 50 км</b> — дальний берег и Ладога (Зеленогорск, Рощино, форт Шанц, Осиновец)\n"
-        "• <b>До 60 км</b> — максимальный выезд (Приветнинское, Смолячково, Пески, Сосново)",
+    builder.row(InlineKeyboardButton(text="🧭 Смотреть места", callback_data="open_feed_direct"))
+    
+    await callback.message.edit_text(
+        f"✅ <b>Выбран режим:</b> {time_name}\n\n"
+        "Теперь в ленте будут места, идеально подходящие под эту атмосферу!",
         parse_mode="HTML",
         reply_markup=builder.as_markup()
     )
 
 
-@dp.callback_query(F.data.startswith("set_dist_"))
-async def save_distance_filter(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    key = callback.data.split("_", 2)[2]
-    
-    db.set_user_distance_filter(user_id, key)
-    dist_name = DISTANCE_GROUPS.get(key, f"До {key} км")
-    
-    await callback.answer(f"Дистанция: {dist_name}", show_alert=False)
-    await callback.message.edit_text(
-        f"✅ <b>Установлен радиус:</b> {dist_name}\n\n"
-        "Локации дальше этой дистанции показываться не будут. "
-        "Жми <b>«🧭 Смотреть локации»</b>!",
-        parse_mode="HTML"
-    )
+# ---------------- ВЫБОР НАПРАВЛЕНИЯ / ЗОНЫ ----------------
 
-
-# ---------------- ВЫБОР ЗОНЫ ----------------
-
-@dp.message(F.text.in_(["📍 Выбор зоны", "Выбор зоны", "Зона"]))
+@dp.message(F.text.in_([
+    "🌲 Направление", "Направление",
+    "📍 Выбор зоны", "Выбор зоны", "Зона"
+]))
 async def select_zone_filter(message: types.Message):
     user_id = message.from_user.id
     current_zone = db.get_user_zone_filter(user_id)
@@ -470,12 +503,13 @@ async def select_zone_filter(message: types.Message):
         builder.row(InlineKeyboardButton(text=f"{mark}{label}", callback_data=f"set_zone_{key}"))
         
     await message.answer(
-        "📍 <b>Выбери район для поиска (северная часть СПб и области):</b>\n\n"
-        "• <b>Курортный р-н</b>: берег Финского залива от Сестрорецка до Зеленогорска и Приветнинского.\n"
-        "• <b>Карельский перешеек & Озера</b>: Токсово, Рощино, Медное озеро, Лемболово, холмы.\n"
-        "• <b>Север СПб</b>: Озерки, Шувалово, Юкки, Лахта-Центр, Крестовский.\n"
-        "• <b>Дамба и Кронштадт</b>: створные молы посреди моря, форт Шанц.\n"
-        "• <b>Ладога</b>: песчаные пляжи Коккорево и Осиновецкий маяк.",
+        "🌲 <b>Выбери географическое направление:</b>\n\n"
+        "• <b>Весь Север</b> — свободный поиск по всем направлениям.\n"
+        "• <b>Курортный р-н</b> — берег залива от Сестрорецка до Зеленогорска.\n"
+        "• <b>Озера и Перешеек</b> — Токсово, Рощино, Медное озеро, холмы.\n"
+        "• <b>Север СПб</b> — Озерки, Шувалово, Юкки, Лахта, Крестовский.\n"
+        "• <b>Дамба и Кронштадт</b> — молы посреди моря, форты.\n"
+        "• <b>Всеволожск и Ладога</b> — пляжи Ладожского озера и сосновые леса.",
         parse_mode="HTML",
         reply_markup=builder.as_markup()
     )
@@ -489,24 +523,37 @@ async def save_zone_filter(callback: types.CallbackQuery):
     db.set_user_zone_filter(user_id, key)
     zone_name = ZONE_NAMES.get(key, "Весь Север СПб и ЛО")
     
-    await callback.answer(f"Зона: {zone_name}", show_alert=False)
+    await callback.answer(f"Направление: {zone_name}", show_alert=False)
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🧭 Смотреть места", callback_data="open_feed_direct"))
+    
     await callback.message.edit_text(
-        f"✅ <b>Выбрана зона:</b> {zone_name}\n\n"
-        "Жми <b>«🧭 Смотреть локации»</b>, чтобы исследовать споты в этом направлении!",
-        parse_mode="HTML"
-    )
-
-
-# Поддержка старой кнопки обновления (если осталась в истории чата)
-@dp.message(F.text.in_(["🔄 Обновить базу", "🔄 Обновить базу мест", "Обновить базу"]))
-async def legacy_update_database(message: types.Message):
-    added_count, total_count = db.auto_update_and_expand_places()
-    await message.answer(
-        f"✅ <b>База актуальна (всего {total_count} спотов до 60 км)!</b>\n\n"
-        "Бот сам обновляет и дополняет базу каждые 6 часов в фоне, кнопку нажимать не требуется.",
+        f"✅ <b>Выбрано направление:</b> {zone_name}\n\n"
+        "Жми кнопку ниже, чтобы начать просмотр!",
         parse_mode="HTML",
-        reply_markup=get_main_menu_keyboard()
+        reply_markup=builder.as_markup()
     )
+
+
+# Быстрый переход к ленте по инлайн-кнопке
+@dp.callback_query(F.data == "open_feed_direct")
+async def open_feed_callback(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    next_place = db.get_next_smart_place(user_id)
+    
+    if not next_place:
+        stats = db.get_user_stats(user_id)
+        await callback.message.edit_text(
+            f"🎉 <b>Все локации в этом фильтре просмотрены ({stats['dist_filter']}, {stats['time_filter']})!</b>\n\n"
+            "Попробуй увеличить радиус или сменить режим времени в меню.",
+            parse_mode="HTML"
+        )
+        return
+        
+    card_text = format_card(next_place)
+    kb = get_swipe_keyboard(next_place["id"], next_place["yandex_map"])
+    await callback.message.edit_text(card_text, parse_mode="HTML", reply_markup=kb)
 
 
 # ---------------- ИЗБРАННОЕ ----------------
@@ -519,7 +566,7 @@ async def show_favorites(message: types.Message):
     if not favorites:
         await message.answer(
             "⭐ <b>Твое избранное пока пусто!</b>\n\n"
-            "Нажми <b>«🧭 Смотреть локации»</b> и жми <b>❤️ В избранное</b> на понравившихся местах.",
+            "Нажми <b>«🧭 Смотреть места»</b> и ставь <b>❤️ В избранное</b> на понравившихся точках.",
             parse_mode="HTML",
             reply_markup=get_main_menu_keyboard()
         )
@@ -540,17 +587,28 @@ async def show_favorites(message: types.Message):
 
 @dp.callback_query(F.data.startswith("fav_view_"))
 async def view_favorite_place(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
     place_id = callback.data.split("_", 2)[2]
+    
+    # Ищем место и обогащаем от точки пользователя
+    start_pt = db.get_user_start_point(user_id)
     place = db.get_place_by_id(place_id)
     
     if not place:
         await callback.answer("Локация не найдена!", show_alert=True)
         return
         
+    d_km = db.haversine_distance_km(start_pt["lat"], start_pt["lon"], place.get("lat", 60.0), place.get("lon", 30.0))
+    place["distance_km"] = d_km
+    place["car_time"] = db.estimate_car_time(d_km)
+    place["start_name"] = start_pt["name"]
+    route_url = f"https://yandex.ru/maps/?rtext={start_pt['lat']},{start_pt['lon']}~{place.get('lat', 60.0)},{place.get('lon', 30.0)}&rtt=auto"
+    place["yandex_map"] = route_url
+    
     card_text = format_card(place)
     
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="🗺 Маршрут в Яндекс.Картах", url=place["yandex_map"]))
+    builder.row(InlineKeyboardButton(text="🗺 Маршрут в Яндекс.Картах", url=route_url))
     builder.row(
         InlineKeyboardButton(text="✅ Уже побывал тут", callback_data=f"fav_visited_{place['id']}"),
         InlineKeyboardButton(text="❌ Из избранного", callback_data=f"fav_del_{place['id']}")
@@ -631,43 +689,216 @@ async def back_to_fav_list(callback: types.CallbackQuery):
     )
 
 
+# ---------------- РАЗДЕЛ: ГДЕ Я БЫЛ ----------------
+
+@dp.message(F.text.in_(["✅ Где я был", "Где я был", "Посещенные места"]))
+async def show_visited_places(message: types.Message):
+    user_id = message.from_user.id
+    visited = db.get_user_visited(user_id)
+    
+    if not visited:
+        await message.answer(
+            "✅ <b>Список посещенных мест пока пуст!</b>\n\n"
+            "Когда листаешь споты (<b>«🧭 Смотреть места»</b>), "
+            "нажимай <b>«✅ Уже был здесь»</b> на знакомых точках. "
+            "Бот запомнит их и больше не станет предлагать в ленте.",
+            parse_mode="HTML",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
+        
+    builder = InlineKeyboardBuilder()
+    for place in visited:
+        btn_text = f"✅ {place['title']} (~{place['distance_km']} км)"
+        builder.row(InlineKeyboardButton(text=btn_text, callback_data=f"vis_view_{place['id']}"))
+        
+    await message.answer(
+        f"✅ <b>Места, где ты уже побывал ({len(visited)}):</b>\n"
+        "Они исключены из ленты рекомендаций. Нажми, чтобы открыть карточку или вернуть место в ленту:",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
+
+
+@dp.callback_query(F.data.startswith("vis_view_"))
+async def view_visited_place(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    place_id = callback.data.split("_", 2)[2]
+    
+    start_pt = db.get_user_start_point(user_id)
+    place = db.get_place_by_id(place_id)
+    
+    if not place:
+        await callback.answer("Локация не найдена!", show_alert=True)
+        return
+        
+    d_km = db.haversine_distance_km(start_pt["lat"], start_pt["lon"], place.get("lat", 60.0), place.get("lon", 30.0))
+    place["distance_km"] = d_km
+    place["car_time"] = db.estimate_car_time(d_km)
+    place["start_name"] = start_pt["name"]
+    route_url = f"https://yandex.ru/maps/?rtext={start_pt['lat']},{start_pt['lon']}~{place.get('lat', 60.0)},{place.get('lon', 30.0)}&rtt=auto"
+    place["yandex_map"] = route_url
+    
+    card_text = format_card(place)
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🗺 Маршрут в Яндекс.Картах", url=route_url))
+    builder.row(InlineKeyboardButton(text="❌ Вернуть место в ленту", callback_data=f"vis_del_{place['id']}"))
+    builder.row(InlineKeyboardButton(text="⬅️ Назад к посещенным", callback_data="vis_back_list"))
+    
+    await callback.message.edit_text(card_text, parse_mode="HTML", reply_markup=builder.as_markup())
+
+
+@dp.callback_query(F.data.startswith("vis_del_"))
+async def delete_visited_mark(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    place_id = callback.data.split("_", 2)[2]
+    
+    db.remove_visited(user_id, place_id)
+    await callback.answer("Отметка снята! Место снова может появиться в ленте.", show_alert=True)
+    
+    visited = db.get_user_visited(user_id)
+    if not visited:
+        await callback.message.edit_text(
+            "✅ <b>В списке посещенных больше ничего нет.</b>\n"
+            "Все точки снова доступны к показу в ленте!",
+            parse_mode="HTML"
+        )
+        return
+        
+    builder = InlineKeyboardBuilder()
+    for place in visited:
+        btn_text = f"✅ {place['title']} (~{place['distance_km']} км)"
+        builder.row(InlineKeyboardButton(text=btn_text, callback_data=f"vis_view_{place['id']}"))
+        
+    await callback.message.edit_text(
+        f"✅ <b>Места, где ты уже побывал ({len(visited)}):</b>",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
+
+
+@dp.callback_query(F.data == "vis_back_list")
+async def back_to_visited_list(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    visited = db.get_user_visited(user_id)
+    
+    if not visited:
+        await callback.message.edit_text("✅ Список посещенных мест пуст.", parse_mode="HTML")
+        return
+        
+    builder = InlineKeyboardBuilder()
+    for place in visited:
+        btn_text = f"✅ {place['title']} (~{place['distance_km']} км)"
+        builder.row(InlineKeyboardButton(text=btn_text, callback_data=f"vis_view_{place['id']}"))
+        
+    await callback.message.edit_text(
+        f"✅ <b>Места, где ты уже побывал ({len(visited)}):</b>",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
+
+
 # ---------------- СТАТИСТИКА И ПРОФИЛЬ ----------------
 
-@dp.message(F.text.in_(["📊 Мой профиль", "Мой профиль", "Профиль"]))
+@dp.message(F.text.in_(["📊 Профиль", "Профиль", "📊 Мой профиль", "Мой профиль"]))
 async def user_profile(message: types.Message):
+    """
+    Профиль пользователя.
+    Гарантированно возвращает новое компактное меню (исправлен баг со старым меню).
+    """
     user_id = message.from_user.id
     stats = db.get_user_stats(user_id)
     
     fav_pref = stats["top_category"] if stats["top_category"] else "еще формируется"
     
     profile_text = (
-        "📊 <b>Твой профиль ночного путешественника:</b>\n\n"
+        "📊 <b>Твой профиль путешественника:</b>\n\n"
         f"👁 <b>Просмотрено спотов:</b> {stats['total_seen']} из {stats['total_available']}\n"
         f"❤️ <b>В избранном:</b> {stats['liked_count']}\n"
         f"✅ <b>Уже побывал:</b> {stats['visited_count']}\n"
         f"➡️ <b>Пропущено:</b> {stats['skipped_count']}\n\n"
-        f"✨ <b>Любимый вайб:</b> {fav_pref}\n"
-        f"🎯 <b>Радиус поиска:</b> {stats['dist_filter']}\n"
-        f"🌙 <b>Режим времени:</b> {stats['time_filter']}\n"
-        f"📍 <b>Направление:</b> {stats['zone_filter']}\n\n"
-        "<i>База автоматически пополняется каждые 6 часов.</i>"
+        f"📍 <b>Точка старта:</b> {stats['start_name']}\n"
+        f"📏 <b>Радиус поиска:</b> {stats['dist_filter']}\n"
+        f"🕒 <b>Режим атмосферы:</b> {stats['time_filter']}\n"
+        f"🌲 <b>Направление:</b> {stats['zone_filter']}\n"
+        f"✨ <b>Любимый вайб:</b> {fav_pref}\n\n"
+        "<i>Используй кнопки ниже для быстрой настройки параметров:</i>"
     )
-    await message.answer(profile_text, parse_mode="HTML", reply_markup=get_main_menu_keyboard())
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="📍 Сменить метро", callback_data="reopen_start_point"),
+        InlineKeyboardButton(text="📏 Дистанция", callback_data="prof_set_dist")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🕒 Время и вайб", callback_data="prof_set_time"),
+        InlineKeyboardButton(text="🌲 Направление", callback_data="prof_set_zone")
+    )
+    
+    await message.answer(
+        profile_text,
+        parse_mode="HTML",
+        reply_markup=get_main_menu_keyboard()
+    )
+    await message.answer("Быстрые настройки фильтра:", reply_markup=builder.as_markup())
+
+
+@dp.callback_query(F.data == "prof_set_dist")
+async def profile_set_dist(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    current_dist = db.get_user_distance_filter(user_id)
+    
+    builder = InlineKeyboardBuilder()
+    for key, label in DISTANCE_GROUPS.items():
+        mark = "✅ " if key == current_dist else ""
+        builder.row(InlineKeyboardButton(text=f"{mark}{label}", callback_data=f"set_dist_{key}"))
+        
+    await callback.message.edit_text("📏 <b>Выбери максимальную дистанцию:</b>", parse_mode="HTML", reply_markup=builder.as_markup())
+
+
+@dp.callback_query(F.data == "prof_set_time")
+async def profile_set_time(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    current_time = db.get_user_time_filter(user_id)
+    
+    builder = InlineKeyboardBuilder()
+    for key, label in TIME_FILTERS.items():
+        mark = "✅ " if key == current_time else ""
+        builder.row(InlineKeyboardButton(text=f"{mark}{label}", callback_data=f"set_time_{key}"))
+        
+    await callback.message.edit_text("🕒 <b>Выбери атмосферу и время суток:</b>", parse_mode="HTML", reply_markup=builder.as_markup())
+
+
+@dp.callback_query(F.data == "prof_set_zone")
+async def profile_set_zone(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    current_zone = db.get_user_zone_filter(user_id)
+    
+    builder = InlineKeyboardBuilder()
+    for key, label in ZONE_NAMES.items():
+        mark = "✅ " if key == current_zone else ""
+        builder.row(InlineKeyboardButton(text=f"{mark}{label}", callback_data=f"set_zone_{key}"))
+        
+    await callback.message.edit_text("🌲 <b>Выбери направление:</b>", parse_mode="HTML", reply_markup=builder.as_markup())
 
 
 # ---------------- СБРОС ИСТОРИИ ----------------
 
-@dp.message(F.text.in_(["🔁 Сбросить всё", "🔁 Сбросить историю", "Сбросить историю", "Сбросить всё"]))
+@dp.message(F.text.in_([
+    "🔁 Сброс", "Сброс",
+    "🔁 Сбросить всё", "🔁 Сбросить историю", "Сбросить историю", "Сбросить всё"
+]))
 async def reset_history_prompt(message: types.Message):
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="⚠️ Да, сбросить всё заново", callback_data="confirm_reset"),
+        InlineKeyboardButton(text="⚠️ Да, сбросить историю", callback_data="confirm_reset"),
         InlineKeyboardButton(text="Отмена", callback_data="cancel_reset")
     )
     await message.answer(
-        "⚠️ <b>Ты точно хочешь сбросить всю историю?</b>\n\n"
-        "Это очистит просмотренные места, избранное и отметки «Был здесь», "
-        "чтобы ты мог пролистать базу с чистого листа.",
+        "⚠️ <b>Ты точно хочешь сбросить историю просмотров?</b>\n\n"
+        "Это очистит просмотренные карточки, чтобы ты мог пролистать базу заново. "
+        "Твоя точка старта и настройки сохранятся.",
         parse_mode="HTML",
         reply_markup=builder.as_markup()
     )
@@ -678,11 +909,15 @@ async def confirm_reset_history(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     db.reset_user_history(user_id)
     
-    await callback.answer("Вся история сброшена!", show_alert=True)
+    await callback.answer("История сброшена!", show_alert=True)
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🧭 Смотреть места", callback_data="open_feed_direct"))
+    
     await callback.message.edit_text(
-        "🔄 <b>Вся история успешно очищена!</b>\n\n"
-        "Все локации снова доступны. Жми <b>«🧭 Смотреть локации»</b>!",
-        parse_mode="HTML"
+        "🔄 <b>История успешно очищена!</b>\n\n"
+        "Все локации снова доступны к показу. Жми кнопку ниже:",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
     )
 
 
@@ -691,17 +926,18 @@ async def cancel_reset_history(callback: types.CallbackQuery):
     await callback.message.delete()
 
 
-# ---------------- ДОБАВЛЕНИЕ СВОЕГО МЕСТА ----------------
+# ---------------- ДОБАВЛЕНИЕ СВОЕГО МЕСТА (ЗАГОТОВКА ПОД ПЛАНЫ) ----------------
 
-@dp.message(F.text.in_(["➕ Добавить место", "Добавить место"]))
+@dp.message(Command("add_place"))
 async def start_add_place(message: types.Message, state: FSMContext):
+    """Команда /add_place доступна как скрытая заготовка под планы."""
     await state.set_state(AddPlaceForm.waiting_title)
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="Отмена", callback_data="cancel_add_place"))
     
     await message.answer(
-        "📍 <b>Добавление новой секретной точки в каталог</b>\n\n"
-        "Шаг 1 из 3: Введи <b>название места</b> (например: <i>Секретный мыс в Репино</i>):",
+        "📍 <b>Добавление новой секретной точки</b>\n\n"
+        "Шаг 1 из 3: Введи <b>название места</b>:",
         parse_mode="HTML",
         reply_markup=builder.as_markup()
     )
@@ -717,9 +953,8 @@ async def cancel_add_place_handler(callback: types.CallbackQuery, state: FSMCont
 async def process_place_title(message: types.Message, state: FSMContext):
     await state.update_data(title=message.text.strip())
     await state.set_state(AddPlaceForm.waiting_vibe)
-    
     await message.answer(
-        "✨ Шаг 2 из 3: Опиши <b>вайб и почему круто ночью</b> (вид на воду, огни, можно ли постоять на машине, покурить):",
+        "✨ Шаг 2 из 3: Опиши <b>атмосферу и вайб</b> (почему круто, вид на воду/огни, можно ли постоять на машине):",
         parse_mode="HTML"
     )
 
@@ -728,7 +963,6 @@ async def process_place_title(message: types.Message, state: FSMContext):
 async def process_place_vibe(message: types.Message, state: FSMContext):
     await state.update_data(vibe=message.text.strip())
     await state.set_state(AddPlaceForm.waiting_map)
-    
     await message.answer(
         "🗺 Шаг 3 из 3: Отправь <b>ссылку на Яндекс.Карты</b> или ориентир:",
         parse_mode="HTML"
@@ -769,13 +1003,13 @@ async def process_place_map(message: types.Message, state: FSMContext):
     if success:
         await message.answer(
             f"🎉 <b>Локация «{data['title']}» успешно сохранена!</b>\n\n"
-            "Она сразу стала доступна в общей ленте рекомендаций.",
+            "Она сразу стала доступна в каталоге рекомендаций.",
             parse_mode="HTML",
             reply_markup=get_main_menu_keyboard()
         )
     else:
         await message.answer(
-            "⚠️ Ошибка при сохранении. Попробуйте еще раз позже.",
+            "⚠️ Ошибка при сохранении.",
             reply_markup=get_main_menu_keyboard()
         )
 
@@ -801,7 +1035,7 @@ async def start_health_check_server():
     """Веб-сервер для поддержания работы 24/7 на облачных хостингах."""
     app = web.Application()
     async def health_handler(request):
-        return web.Response(text="SPB Ozerki Night Places Bot is running 24/7!")
+        return web.Response(text="SPB Places Bot is running 24/7!")
     app.router.add_get("/", health_handler)
     app.router.add_get("/health", health_handler)
     
@@ -824,10 +1058,11 @@ async def main():
         sys.exit(1)
         
     print("=" * 60)
-    print("[+] Ночной бот атмосферных локаций севера СПб запущен!")
-    print("[+] Настраиваемый радиус: 20 -> 30 -> 40 -> 50 -> 60 км.")
-    print("[+] База расширена: 100+ локаций с фокусом на ночные споты 24/7.")
-    print("[+] Кнопка обновления убрана из меню: работает авто-обновление каждые 6 часов.")
+    print("[+] Бот атмосферных локаций СПб и ЛО запущен!")
+    print("[+] Выбор точки старта: Озерки, Гражданский пр., Парнас, Беговая и др. + GPS.")
+    print("[+] Динамический расчет расстояния, времени в пути и навигации Яндекс.Карт.")
+    print("[+] Атмосферный подбор времени суток: Ночь 24/7, Закат, День, Утро.")
+    print("[+] Компактное и интуитивно понятное меню.")
     print("=" * 60)
     
     # Запуск фонового health-check сервера
@@ -836,8 +1071,14 @@ async def main():
     # Запуск фонового авто-обновления базы
     asyncio.create_task(background_auto_updater())
     
+    # Сбрасываем старые зависшие обновления для моментального отклика
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+    except Exception as e:
+        logger.warning(f"Не удалось удалить вебхук: {e}")
+        
     # Запуск polling телеграма
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, drop_pending_updates=True, polling_timeout=20)
 
 
 if __name__ == "__main__":
