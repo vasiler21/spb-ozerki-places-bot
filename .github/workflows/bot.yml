@@ -3,15 +3,19 @@ name: Run Telegram Bot
 on:
   push:
     branches: [ main, master ]
-  workflow_dispatch: # Позволяет запускать вручную по кнопке в Actions
+  workflow_dispatch:
   schedule:
-    # Перезапуск каждые 5 часов (максимальный лимит одного шага в GitHub Actions — 6 часов)
     - cron: '0 */5 * * *'
+
+# Автоматически останавливает старый запуск бота при старте нового
+concurrency:
+  group: telegram-bot-runner
+  cancel-in-progress: true
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350 # Безопасный таймаут до принудительной остановки
+    timeout-minutes: 350
 
     steps:
       - name: Checkout code
