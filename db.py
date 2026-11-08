@@ -1,10 +1,19 @@
 # -*- coding: utf-8 -*-
+"""
+Управление базой данных SQLite для бота атмосферных локаций СПб и ЛО.
+Включает:
+- Управление местами, миграцию схемы и синхронизацию.
+- Реакции пользователя: 'liked' (избранное), 'skipped' (пропуск), 'visited' (я здесь был).
+- Фильтры пользователя: дистанция (строго до 50 км), время суток (24/7 ночные), зона (север СПб и ЛО).
+- Умный алгоритм подбора мест с приоритизацией секретных спотов и ночного чилла.
+"""
+
 import sqlite3
 import os
 import random
 import logging
 from typing import List, Dict, Optional, Tuple, Any
-from places_data import PLACES, CATEGORY_NAMES, DISTANCE_GROUPS
+from places_data import PLACES, CATEGORY_NAMES, DISTANCE_GROUPS, ZONE_NAMES, TIME_FILTERS
 
 logger = logging.getLogger(__name__)
 DB_PATH = os.path.join(os.path.dirname(__file__), "bot_data.db")
@@ -15,19 +24,25 @@ def get_connection():
 
 
 def init_db():
-    """Инициализация таблиц базы данных и синхронизация локаций."""
+    """Инициализация таблиц базы данных и автоматическая миграция новых полей."""
     with get_connection() as conn:
         cursor = conn.cursor()
         
-        # 1. Таблица локаций (динамическая база данных)
+        # 1. Таблица локаций
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS places (
                 id TEXT PRIMARY KEY,
                 title TEXT,
                 category TEXT,
+                zone TEXT DEFAULT 'north_spb',
                 distance_km INTEGER,
                 car_time TEXT,
                 range_group TEXT,
+                is_24_7 INTEGER DEFAULT 1,
+                opening_hours TEXT DEFAULT 'Круглосуточно 24/7',
+                night_vibe TEXT DEFAULT '',
+                car_chill INTEGER DEFAULT 1,
+                popularity TEXT DEFAULT 'hidden',
                 vibe TEXT,
                 season TEXT,
                 time_of_day TEXT,
@@ -39,69 +54,127 @@ def init_db():
             )
         """)
         
-        # 2. Таблица реакций (лайк/пропуск)
+        # Миграция: проверяем и добавляем новые колонки в places, если база уже существовала
+        cursor.execute("PRAGMA table_info(places)")
+        existing_cols = {col[1] for col in cursor.fetchall()}
+        
+        columns_to_add = [
+            ("zone", "TEXT DEFAULT 'north_spb'"),
+            ("is_24_7", "INTEGER DEFAULT 1"),
+            ("opening_hours", "TEXT DEFAULT 'Круглосуточно 24/7'"),
+            ("night_vibe", "TEXT DEFAULT ''"),
+            ("car_chill", "INTEGER DEFAULT 1"),
+            ("popularity", "TEXT DEFAULT 'hidden'")
+        ]
+        for col_name, col_def in columns_to_add:
+            if col_name not in existing_cols:
+                cursor.execute(f"ALTER TABLE places ADD COLUMN {col_name} {col_def}")
+        
+        # 2. Таблица реакций (лайк / пропуск / я здесь был)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_reactions (
                 user_id INTEGER,
                 place_id TEXT,
-                action TEXT, -- 'liked' или 'skipped'
+                action TEXT, -- 'liked', 'skipped', 'visited'
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (user_id, place_id)
             )
         """)
         
-        # 3. Таблица настроек пользователя (фильтр расстояния и т.д.)
+        # 3. Таблица настроек пользователя
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_settings (
                 user_id INTEGER PRIMARY KEY,
-                distance_filter TEXT DEFAULT 'all',
+                distance_filter TEXT DEFAULT '50',
+                time_filter TEXT DEFAULT 'all',
+                zone_filter TEXT DEFAULT 'all_north',
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         
+        # Миграция колонок для user_settings
+        cursor.execute("PRAGMA table_info(user_settings)")
+        existing_settings_cols = {col[1] for col in cursor.fetchall()}
+        
+        settings_to_add = [
+            ("time_filter", "TEXT DEFAULT 'all'"),
+            ("zone_filter", "TEXT DEFAULT 'all_north'")
+        ]
+        for col_name, col_def in settings_to_add:
+            if col_name not in existing_settings_cols:
+                cursor.execute(f"ALTER TABLE user_settings ADD COLUMN {col_name} {col_def}")
+                
+        # 4. Удаляем старые нерелевантные локации с расстоянием > 50 км по просьбе пользователя
+        cursor.execute("DELETE FROM places WHERE distance_km > 50")
+        
         conn.commit()
 
-    # Синхронизируем базовые места из places_data.py при старте
+    # Синхронизируем базовые места из каталога
     sync_places_from_catalog()
 
 
 def sync_places_from_catalog() -> int:
     """
-    Синхронизирует локации из встроенного каталога в таблицу places.
-    Возвращает количество добавленных новых мест.
+    Синхронизирует локации из places_data.py в таблицу places.
+    Обновляет описание и флаги доступности для существующих записей и добавляет новые.
     """
     added_count = 0
     with get_connection() as conn:
         cursor = conn.cursor()
         for p in PLACES:
-            cursor.execute("SELECT id FROM places WHERE id = ?", (p["id"],))
-            if not cursor.fetchone():
-                cursor.execute("""
-                    INSERT INTO places (
-                        id, title, category, distance_km, car_time, range_group,
-                        vibe, season, time_of_day, car_access, photo_tips, yandex_map, is_custom
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-                """, (
-                    p["id"], p["title"], p["category"], p["distance_km"],
-                    p["car_time"], p["range_group"], p["vibe"], p["season"],
-                    p["time_of_day"], p["car_access"], p["photo_tips"], p["yandex_map"]
-                ))
-                added_count += 1
+            # Обновляем или добавляем запись
+            cursor.execute("""
+                INSERT INTO places (
+                    id, title, category, zone, distance_km, car_time, range_group,
+                    is_24_7, opening_hours, night_vibe, car_chill, popularity,
+                    vibe, season, time_of_day, car_access, photo_tips, yandex_map, is_custom
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                ON CONFLICT(id) DO UPDATE SET
+                    title = excluded.title,
+                    category = excluded.category,
+                    zone = excluded.zone,
+                    distance_km = excluded.distance_km,
+                    car_time = excluded.car_time,
+                    range_group = excluded.range_group,
+                    is_24_7 = excluded.is_24_7,
+                    opening_hours = excluded.opening_hours,
+                    night_vibe = excluded.night_vibe,
+                    car_chill = excluded.car_chill,
+                    popularity = excluded.popularity,
+                    vibe = excluded.vibe,
+                    season = excluded.season,
+                    time_of_day = excluded.time_of_day,
+                    car_access = excluded.car_access,
+                    photo_tips = excluded.photo_tips,
+                    yandex_map = excluded.yandex_map
+            """, (
+                p["id"], p["title"], p["category"], p.get("zone", "north_spb"),
+                p["distance_km"], p["car_time"], p.get("range_group", "50"),
+                p.get("is_24_7", 1), p.get("opening_hours", "Круглосуточно 24/7"),
+                p.get("night_vibe", ""), p.get("car_chill", 1), p.get("popularity", "hidden"),
+                p["vibe"], p["season"], p["time_of_day"], p["car_access"],
+                p["photo_tips"], p["yandex_map"]
+            ))
+            added_count += 1
+            
+        # Удаляем любые точки дальше 50 км
+        cursor.execute("DELETE FROM places WHERE distance_km > 50")
         conn.commit()
-    if added_count > 0:
-        logger.info(f"Синхронизировано новых локаций: {added_count}")
+        
     return added_count
 
 
 def get_all_places_from_db() -> List[Dict[str, Any]]:
-    """Получить все активные локации из базы данных SQLite."""
+    """Получить все активные локации из базы данных (строго <= 50 км)."""
     with get_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, title, category, distance_km, car_time, range_group,
+            SELECT id, title, category, zone, distance_km, car_time, range_group,
+                   is_24_7, opening_hours, night_vibe, car_chill, popularity,
                    vibe, season, time_of_day, car_access, photo_tips, yandex_map, is_custom
             FROM places
+            WHERE distance_km <= 50
             ORDER BY distance_km ASC
         """)
         rows = cursor.fetchall()
@@ -114,7 +187,8 @@ def get_place_by_id(place_id: str) -> Optional[Dict[str, Any]]:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, title, category, distance_km, car_time, range_group,
+            SELECT id, title, category, zone, distance_km, car_time, range_group,
+                   is_24_7, opening_hours, night_vibe, car_chill, popularity,
                    vibe, season, time_of_day, car_access, photo_tips, yandex_map, is_custom
             FROM places
             WHERE id = ?
@@ -130,20 +204,30 @@ def add_custom_place(place_dict: Dict[str, Any]) -> bool:
         try:
             cursor.execute("""
                 INSERT INTO places (
-                    id, title, category, distance_km, car_time, range_group,
+                    id, title, category, zone, distance_km, car_time, range_group,
+                    is_24_7, opening_hours, night_vibe, car_chill, popularity,
                     vibe, season, time_of_day, car_access, photo_tips, yandex_map, is_custom
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(id) DO UPDATE SET
                     title = excluded.title,
                     vibe = excluded.vibe,
                     yandex_map = excluded.yandex_map
             """, (
-                place_dict["id"], place_dict["title"], place_dict["category"],
-                place_dict.get("distance_km", 40), place_dict.get("car_time", "30-40 мин"),
-                place_dict.get("range_group", "50"), place_dict["vibe"],
-                place_dict.get("season", "Круглый год"), place_dict.get("time_of_day", "День/закат"),
-                place_dict.get("car_access", "Доступен подъезд на авто"),
-                place_dict.get("photo_tips", "Видовые кадры природы и архитектуры"),
+                place_dict["id"], place_dict["title"], place_dict.get("category", "night_chill"),
+                place_dict.get("zone", "north_spb"),
+                min(place_dict.get("distance_km", 25), 50),
+                place_dict.get("car_time", "25-30 мин"),
+                place_dict.get("range_group", "25"),
+                place_dict.get("is_24_7", 1),
+                place_dict.get("opening_hours", "Круглосуточно 24/7"),
+                place_dict.get("night_vibe", "Отличное место для ночного чилла"),
+                place_dict.get("car_chill", 1),
+                place_dict.get("popularity", "secret"),
+                place_dict["vibe"],
+                place_dict.get("season", "Круглый год"),
+                place_dict.get("time_of_day", "Круглосуточно"),
+                place_dict.get("car_access", "Подъезд на авто доступен"),
+                place_dict.get("photo_tips", "Видовые кадры природы и воды"),
                 place_dict.get("yandex_map", "https://yandex.ru/maps/")
             ))
             conn.commit()
@@ -153,163 +237,16 @@ def add_custom_place(place_dict: Dict[str, Any]) -> bool:
             return False
 
 
-# Пул дополнительных уникальных секретных локаций для авто-дополнения базы
-AUTO_DISCOVERY_POOL = [
-    {
-        "id": "fort_krasnaya_gorka",
-        "title": "Форт «Красная Горка» и артиллерийские транспортеры",
-        "category": "architecture",
-        "distance_km": 74,
-        "car_time": "1 час по КАД через Кронштадт",
-        "range_group": "80",
-        "vibe": "Гигантские 305-мм морские орудия на железнодорожных транспортерах, сосновый бор на обрыве над заливом.",
-        "season": "Круглый год.",
-        "time_of_day": "День или закат.",
-        "car_access": "Асфальт через поселок Лебяжье прямо до форта. Проезд свободный.",
-        "photo_tips": "Огромные пушки на рельсах, старинные пороховые погреба среди песчаных дюн.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.333333,59.973611&z=15&l=map"
-    },
-    {
-        "id": "taitsy_demidov_estate",
-        "title": "Заброшенная усадьба Демидовых в Тайцах",
-        "category": "architecture",
-        "distance_km": 52,
-        "car_time": "50 мин по Киевскому ш.",
-        "range_group": "80",
-        "vibe": "Готический колодец-башня, Горбатый мост, вековые дубы и таинственный каменный дворец в романтическом парке.",
-        "season": "Осень и весна.",
-        "time_of_day": "Предзакатный час.",
-        "car_access": "Асфальт до поселка Тайцы, парковка у входа в парк.",
-        "photo_tips": "Готический колодец из серого камня, отражения старинных мостиков в пруду.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.121944,59.658889&z=15&l=map"
-    },
-    {
-        "id": "ragusha_canyon",
-        "title": "Каньон реки Рагуша и исчезающая река",
-        "category": "nature",
-        "distance_km": 140,
-        "car_time": "2 часа по Мурманскому шоссе",
-        "range_group": "100+",
-        "vibe": "Уникальный природный каньон карстового происхождения: река уходит под землю, обнажая сухое каменистое русло с водопадами.",
-        "season": "Май — октябрь.",
-        "time_of_day": "Полдень.",
-        "car_access": "Трасса на Тихвин, далее через Бокситогорск. Доступно для легковых авто.",
-        "photo_tips": "Отвесные скальные стены каньона, дикие карстовые воронки и пороги.",
-        "yandex_map": "https://yandex.ru/maps/?pt=33.951389,59.288889&z=15&l=map"
-    },
-    {
-        "id": "krasavitsa_lake",
-        "title": "Озеро Красавица (Большое Симагинское) в Ильичево",
-        "category": "lakes",
-        "distance_km": 44,
-        "car_time": "40 мин по трассе «Скандинавия»",
-        "range_group": "50",
-        "vibe": "Высокие сосновые обрывы, чистейшая вода и золотистый песок. Одно из самых романтичных озер перешейка.",
-        "season": "Лето (купание и сапборды), осень (сосновый воздух и прогулки).",
-        "time_of_day": "Закат над озером.",
-        "car_access": "Асфальт до поселка Ильичево, подъезды прямо к прибрежному сосняку.",
-        "photo_tips": "Панорама с высокого соснового утеса на зеркало воды.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.788889,60.258889&z=15&l=map"
-    },
-    {
-        "id": "gladyshevsky_reserve",
-        "title": "Заказник «Гладышевский» и старая финская мельница",
-        "category": "nature",
-        "distance_km": 53,
-        "car_time": "45 мин по Приморскому шоссе",
-        "range_group": "80",
-        "vibe": "Буйная карельская река Гладышевка с редкими жемчужницами, руины каменной финской мельницы и вековые ели.",
-        "season": "Весна и золотая осень.",
-        "time_of_day": "Дневной рассеянный свет.",
-        "car_access": "Асфальт по Приморскому ш. до поселка Серово, стоянка у экотропы.",
-        "photo_tips": "Каменные замшелые стены старой мельницы среди бурного потока воды.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.561944,60.198889&z=15&l=map"
-    },
-    {
-        "id": "rodon_lopuhinka",
-        "title": "Радоновые озера и каньон в Лопухинке",
-        "category": "nature",
-        "distance_km": 68,
-        "car_time": "55 мин по КАД через Гостилицы",
-        "range_group": "80",
-        "vibe": "Изумрудно-бирюзовая целебная вода, питаемая чистыми подземными радоновыми ключами, каньон и старая усадьба.",
-        "season": "Круглый год. Вода не замерзает даже зимой и сохраняет сказочный цвет.",
-        "time_of_day": "Ясный солнечный день.",
-        "car_access": "Асфальт до деревни Лопухинка, удобная парковка у спуска к озерам.",
-        "photo_tips": "Деревянные мостки вдоль изумрудных озер, купель и родники.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.418889,59.738889&z=15&l=map"
-    },
-    {
-        "id": "baryshevo_bridge",
-        "title": "Подвесной мост через Вуоксу и мыс Черемуховый",
-        "category": "nature",
-        "distance_km": 86,
-        "car_time": "1 час 15 мин по трассе «Скандинавия»",
-        "range_group": "100+",
-        "vibe": "Качающийся подвесной мостик над широким плесом Вуоксы, гранитные скалы и тихие сосновые бухты.",
-        "season": "С мая по октябрь.",
-        "time_of_day": "Закатный 'золотой час'.",
-        "car_access": "Асфальт до поселка Барышево, далее 500 м лесной грунтовки.",
-        "photo_tips": "Атмосферный кадр прямо с середины качающегося моста над водной гладью.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.578889,60.698889&z=15&l=map"
-    },
-    {
-        "id": "vysokinskoe_lake",
-        "title": "Озеро Высокинское и сосновая дюна у залива",
-        "category": "lakes",
-        "distance_km": 77,
-        "car_time": "1 час 10 мин по Приморскому шоссе",
-        "range_group": "80",
-        "vibe": "Уникальное место, где чистейшее пресное озеро отделено от Финского залива лишь узкой полосой сосновых дюн.",
-        "season": "Лето и ранняя осень.",
-        "time_of_day": "Закат на заливе и рассвет на озере.",
-        "car_access": "Приморское шоссе, съезды в сосновый бор к пляжам.",
-        "photo_tips": "Песчаная коса, поросшая стройными соснами, вид на открытое море.",
-        "yandex_map": "https://yandex.ru/maps/?pt=28.868889,60.308889&z=15&l=map"
-    }
-]
-
-
 def auto_update_and_expand_places() -> Tuple[int, int]:
-    """
-    Автоматическое обновление и дополнение базы данных локаций.
-    Синхронизирует текущие места и подгружает новые локации из пула открытий.
-    Возвращает: (добавлено_новых, всего_в_базе)
-    """
-    init_db()
-    added_from_catalog = sync_places_from_catalog()
-    
-    # Добавляем новые споты из пула авто-открытий
-    added_from_pool = 0
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        for p in AUTO_DISCOVERY_POOL:
-            cursor.execute("SELECT id FROM places WHERE id = ?", (p["id"],))
-            if not cursor.fetchone():
-                cursor.execute("""
-                    INSERT INTO places (
-                        id, title, category, distance_km, car_time, range_group,
-                        vibe, season, time_of_day, car_access, photo_tips, yandex_map, is_custom
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-                """, (
-                    p["id"], p["title"], p["category"], p["distance_km"],
-                    p["car_time"], p["range_group"], p["vibe"], p["season"],
-                    p["time_of_day"], p["car_access"], p["photo_tips"], p["yandex_map"]
-                ))
-                added_from_pool += 1
-        conn.commit()
+    """Делегирует обновление модулю places_updater."""
+    import places_updater
+    return places_updater.update_and_expand_places()
 
-        # Считаем общее число локаций в базе
-        cursor.execute("SELECT COUNT(*) FROM places")
-        total_in_db = cursor.fetchone()[0]
 
-    total_added = added_from_catalog + added_from_pool
-    logger.info(f"Авто-обновление базы: добавлено {total_added}, всего теперь {total_in_db}")
-    return total_added, total_in_db
-
+# ---------------- НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ ----------------
 
 def set_user_distance_filter(user_id: int, distance_filter: str):
-    """Установить фильтр по расстоянию для пользователя."""
+    """Установить фильтр максимального расстояния (15, 25, 35, 50)."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -323,16 +260,73 @@ def set_user_distance_filter(user_id: int, distance_filter: str):
 
 
 def get_user_distance_filter(user_id: int) -> str:
-    """Получить текущий фильтр по расстоянию."""
+    """Получить текущий фильтр расстояния (по умолчанию '50' км)."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT distance_filter FROM user_settings WHERE user_id = ?", (user_id,))
         row = cursor.fetchone()
-        return row[0] if row else "all"
+        val = row[0] if row and row[0] else "50"
+        # Если старое значение было "all", "80", "100+", заменяем на 50 км
+        if val in ("all", "80", "100+"):
+            val = "50"
+        return val
 
+
+def set_user_time_filter(user_id: int, time_filter: str):
+    """Установить фильтр по времени суток: 'all', 'night', 'sunset', 'day'."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO user_settings (user_id, time_filter)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                time_filter = excluded.time_filter,
+                updated_at = CURRENT_TIMESTAMP
+        """, (user_id, time_filter))
+        conn.commit()
+
+
+def get_user_time_filter(user_id: int) -> str:
+    """Получить текущий фильтр времени суток (по умолчанию 'all')."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT time_filter FROM user_settings WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        return row[0] if row and row[0] else "all"
+
+
+def set_user_zone_filter(user_id: int, zone_filter: str):
+    """Установить фильтр зоны: 'all_north', 'kurortny', 'priozersk_vyborg', 'north_spb', 'damba_kronstadt', 'vsevolozhsk_ladoga'."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO user_settings (user_id, zone_filter)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                zone_filter = excluded.zone_filter,
+                updated_at = CURRENT_TIMESTAMP
+        """, (user_id, zone_filter))
+        conn.commit()
+
+
+def get_user_zone_filter(user_id: int) -> str:
+    """Получить текущий фильтр зоны (по умолчанию 'all_north')."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT zone_filter FROM user_settings WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        return row[0] if row and row[0] else "all_north"
+
+
+# ---------------- РЕАКЦИИ ПОЛЬЗОВАТЕЛЯ (LIKE / SKIP / VISITED) ----------------
 
 def record_reaction(user_id: int, place_id: str, action: str):
-    """Записать реакцию: 'liked' (в избранное) или 'skipped' (пропуск)."""
+    """
+    Записать реакцию:
+    - 'liked' (в избранное)
+    - 'skipped' (пропуск)
+    - 'visited' (я здесь уже был)
+    """
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -357,8 +351,19 @@ def remove_favorite(user_id: int, place_id: str):
         conn.commit()
 
 
+def remove_visited(user_id: int, place_id: str):
+    """Снять отметку «Был здесь»."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            DELETE FROM user_reactions
+            WHERE user_id = ? AND place_id = ? AND action = 'visited'
+        """, (user_id, place_id))
+        conn.commit()
+
+
 def get_user_favorites(user_id: int) -> List[Dict[str, Any]]:
-    """Получить список всех избранных локаций пользователя из базы."""
+    """Получить список всех избранных локаций пользователя."""
     with get_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -372,8 +377,23 @@ def get_user_favorites(user_id: int) -> List[Dict[str, Any]]:
         return [dict(r) for r in rows]
 
 
+def get_user_visited(user_id: int) -> List[Dict[str, Any]]:
+    """Получить список локаций, где пользователь уже был."""
+    with get_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT p.* FROM user_reactions r
+            JOIN places p ON r.place_id = p.id
+            WHERE r.user_id = ? AND r.action = 'visited'
+            ORDER BY r.created_at DESC
+        """, (user_id,))
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
 def reset_user_history(user_id: int):
-    """Полный сброс истории: удаление всех лайков, пропусков и сброс фильтров."""
+    """Полный сброс истории: очистка лайков, пропусков, отметок 'был здесь' и фильтров."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM user_reactions WHERE user_id = ?", (user_id,))
@@ -382,7 +402,7 @@ def reset_user_history(user_id: int):
 
 
 def get_user_stats(user_id: int) -> Dict[str, Any]:
-    """Получить статистику пользователя по просмотренным и любимым категориям."""
+    """Получить расширенную статистику пользователя."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -399,12 +419,13 @@ def get_user_stats(user_id: int) -> Dict[str, Any]:
         """, (user_id,))
         categories = [r[0] for r in cursor.fetchall()]
 
-        cursor.execute("SELECT COUNT(*) FROM places")
+        cursor.execute("SELECT COUNT(*) FROM places WHERE distance_km <= 50")
         total_available = cursor.fetchone()[0]
     
     liked_count = counts.get("liked", 0)
     skipped_count = counts.get("skipped", 0)
-    total_seen = liked_count + skipped_count
+    visited_count = counts.get("visited", 0)
+    total_seen = liked_count + skipped_count + visited_count
     
     cat_likes: Dict[str, int] = {}
     for cat in categories:
@@ -415,33 +436,44 @@ def get_user_stats(user_id: int) -> Dict[str, Any]:
         top_cat_key = max(cat_likes, key=cat_likes.get)
         top_cat = CATEGORY_NAMES.get(top_cat_key, top_cat_key)
         
+    dist_filter = get_user_distance_filter(user_id)
+    time_filter = get_user_time_filter(user_id)
+    zone_filter = get_user_zone_filter(user_id)
+        
     return {
         "total_seen": total_seen,
         "liked_count": liked_count,
         "skipped_count": skipped_count,
+        "visited_count": visited_count,
         "total_available": total_available,
-        "top_category": top_cat
+        "top_category": top_cat,
+        "dist_filter": DISTANCE_GROUPS.get(dist_filter, f"До {dist_filter} км"),
+        "time_filter": TIME_FILTERS.get(time_filter, "Любое время"),
+        "zone_filter": ZONE_NAMES.get(zone_filter, "Весь Север")
     }
 
 
+# ---------------- УМНЫЙ АЛГОРИТМ ПОДБОРА ЛОКАЦИЙ ----------------
+
 def get_next_smart_place(user_id: int) -> Optional[Dict[str, Any]]:
     """
-    Умный подбор следующей непросмотренной локации из базы данных:
-    1. Исключает уже просмотренные (лайкнутые или пропущенные).
-    2. Учитывает выбранный пользователем радиус расстояния.
-    3. Ранжирует на основе предпочтений: отдает предпочтение категориям,
-       которые пользователь чаще всего лайкал!
+    Интеллектуальный подбор следующей локации:
+    1. Исключает просмотренные (лайкнутые, пропущенные И отмеченные как 'visited' - «Был здесь»).
+    2. Строго соблюдает числовой фильтр расстояния: distance_km <= max_km (строго <= 50 км!).
+    3. При фильтре 'night' выбирает ТОЛЬКО круглосуточные места (is_24_7 == 1) с открытым въездом!
+    4. Учитывает выбранную географическую зону севера СПб и области.
+    5. Ранжирует в пользу небанальных/секретных точек (popularity: 'secret', 'hidden') и авто-чилла.
     """
     with get_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
-        # Получаем реакции пользователя
+        # Получаем все реакции (лайк, скип, был здесь)
         cursor.execute("SELECT place_id, action FROM user_reactions WHERE user_id = ?", (user_id,))
         reactions = cursor.fetchall()
         seen_ids = {r["place_id"] for r in reactions}
         
-        # Подсчет лайков по категориям
+        # Лайки по категориям
         cursor.execute("""
             SELECT p.category, COUNT(*) as cnt FROM user_reactions r
             JOIN places p ON r.place_id = p.id
@@ -451,22 +483,58 @@ def get_next_smart_place(user_id: int) -> Optional[Dict[str, Any]]:
         cat_likes = {r["category"]: r["cnt"] for r in cursor.fetchall()}
 
     all_places = get_all_places_from_db()
-    dist_filter = get_user_distance_filter(user_id)
+    dist_filter_str = get_user_distance_filter(user_id)
+    time_filter = get_user_time_filter(user_id)
+    zone_filter = get_user_zone_filter(user_id)
     
-    # Кандидаты (непросмотренные)
+    try:
+        max_dist_km = min(int(dist_filter_str), 50)
+    except Exception:
+        max_dist_km = 50
+
+    # 1. Отсеиваем уже увиденные и посещенные места
     candidates = [p for p in all_places if p["id"] not in seen_ids]
     
-    # Применяем фильтр расстояния, если он не 'all'
-    if dist_filter != "all":
-        candidates = [p for p in candidates if p["range_group"] == dist_filter]
+    # 2. Строгий фильтр по дальности (никаких мест дальше выбранного радиуса, и не больше 50 км!)
+    candidates = [p for p in candidates if p["distance_km"] <= max_dist_km]
+    
+    # 3. Фильтр по времени суток
+    if time_filter == "night":
+        # ТОЛЬКО места с круглосуточным доступом 24/7 и открытым въездом!
+        candidates = [p for p in candidates if p.get("is_24_7", 1) == 1]
+    elif time_filter == "sunset":
+        candidates = [p for p in candidates if "закат" in p.get("time_of_day", "").lower() or p.get("category") in ("coast", "viewpoint")]
+    elif time_filter == "day":
+        candidates = [p for p in candidates if "день" in p.get("time_of_day", "").lower() or p.get("category") in ("nature", "architecture")]
+
+    # 4. Фильтр по зоне
+    if zone_filter != "all_north":
+        candidates = [p for p in candidates if p.get("zone") == zone_filter]
         
     if not candidates:
         return None
         
+    # 5. Умное ранжирование
     def score_place(place: Dict[str, Any]) -> float:
-        cat_score = cat_likes.get(place["category"], 0) * 2 + 1
-        random_factor = random.uniform(0.8, 1.5)
-        return cat_score * random_factor
+        score = 10.0
+        
+        # Приоритет секретным и небанальным спотам (пользователь уже был во многих классических)
+        pop = place.get("popularity", "hidden")
+        if pop == "secret":
+            score += 15.0
+        elif pop == "hidden":
+            score += 8.0
+            
+        # Бонус за возможность комфортного авто-чилла (постоять в машине/покурить/вид)
+        if place.get("car_chill", 0) == 1:
+            score += 6.0
+            
+        # Бонус за любимые категории
+        score += cat_likes.get(place.get("category", ""), 0) * 3.0
+        
+        # Случайный фактор для разнообразия выборки
+        score *= random.uniform(0.85, 1.25)
+        return score
 
     candidates.sort(key=score_place, reverse=True)
     return candidates[0]
