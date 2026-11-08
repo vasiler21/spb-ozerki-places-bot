@@ -1,8 +1,6 @@
 name: Run Telegram Bot
 
 on:
-  push:
-    branches: [ main, master ]
   workflow_dispatch:
   schedule:
     - cron: '0 */5 * * *'
