@@ -4,7 +4,7 @@
 Включает:
 - Управление местами, миграцию схемы и синхронизацию.
 - Реакции пользователя: 'liked' (избранное), 'skipped' (пропуск), 'visited' (я здесь был).
-- Фильтры пользователя: дистанция (строго до 50 км), время суток (по умолчанию: 24/7 ночные), зона (север СПб и ЛО).
+- Фильтры пользователя: дистанция (20, 30, 40, 50, до 60 км), время суток (по умолчанию: 24/7 ночные), зона (север СПб и ЛО).
 - Умный алгоритм подбора мест с приоритизацией секретных спотов и ночного чилла.
 """
 
@@ -14,6 +14,7 @@ import random
 import logging
 from typing import List, Dict, Optional, Tuple, Any
 from places_data import PLACES, CATEGORY_NAMES, DISTANCE_GROUPS, ZONE_NAMES, TIME_FILTERS
+from places_updater import AUTO_DISCOVERY_POOL
 
 logger = logging.getLogger(__name__)
 DB_PATH = os.path.join(os.path.dirname(__file__), "bot_data.db")
@@ -81,11 +82,11 @@ def init_db():
             )
         """)
         
-        # 3. Таблица настроек пользователя (ночной фильтр по умолчанию включен!)
+        # 3. Таблица настроек пользователя (по умолчанию: дистанция 60 км, режим ночной)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_settings (
                 user_id INTEGER PRIMARY KEY,
-                distance_filter TEXT DEFAULT '50',
+                distance_filter TEXT DEFAULT '60',
                 time_filter TEXT DEFAULT 'night',
                 zone_filter TEXT DEFAULT 'all_north',
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -104,8 +105,8 @@ def init_db():
             if col_name not in existing_settings_cols:
                 cursor.execute(f"ALTER TABLE user_settings ADD COLUMN {col_name} {col_def}")
                 
-        # 4. Удаляем старые нерелевантные локации с расстоянием > 50 км
-        cursor.execute("DELETE FROM places WHERE distance_km > 50")
+        # 4. Удаляем старые локации с расстоянием > 60 км
+        cursor.execute("DELETE FROM places WHERE distance_km > 60")
         
         conn.commit()
 
@@ -121,8 +122,10 @@ def sync_places_from_catalog() -> int:
     with get_connection() as conn:
         cursor = conn.cursor()
         
-        # 1. Загрузка из PLACES
-        for p in PLACES:
+        # 1. Загрузка из основного каталога PLACES
+        all_to_sync = list(PLACES) + list(AUTO_DISCOVERY_POOL)
+        
+        for p in all_to_sync:
             cursor.execute("""
                 INSERT INTO places (
                     id, title, category, zone, distance_km, car_time, range_group,
@@ -157,15 +160,15 @@ def sync_places_from_catalog() -> int:
             ))
             added_count += 1
             
-        # Удаляем любые точки дальше 50 км
-        cursor.execute("DELETE FROM places WHERE distance_km > 50")
+        # Удаляем любые точки дальше 60 км
+        cursor.execute("DELETE FROM places WHERE distance_km > 60")
         conn.commit()
         
     return added_count
 
 
 def get_all_places_from_db() -> List[Dict[str, Any]]:
-    """Получить все активные локации из базы данных (строго <= 50 км)."""
+    """Получить все активные локации из базы данных (строго <= 60 км)."""
     with get_connection() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -174,7 +177,7 @@ def get_all_places_from_db() -> List[Dict[str, Any]]:
                    is_24_7, opening_hours, night_vibe, car_chill, popularity,
                    vibe, season, time_of_day, car_access, photo_tips, yandex_map, is_custom
             FROM places
-            WHERE distance_km <= 50
+            WHERE distance_km <= 60
             ORDER BY distance_km ASC
         """)
         rows = cursor.fetchall()
@@ -215,9 +218,9 @@ def add_custom_place(place_dict: Dict[str, Any]) -> bool:
             """, (
                 place_dict["id"], place_dict["title"], place_dict.get("category", "night_chill"),
                 place_dict.get("zone", "north_spb"),
-                min(place_dict.get("distance_km", 25), 50),
+                min(place_dict.get("distance_km", 25), 60),
                 place_dict.get("car_time", "25-30 мин"),
-                place_dict.get("range_group", "25"),
+                place_dict.get("range_group", "30"),
                 place_dict.get("is_24_7", 1),
                 place_dict.get("opening_hours", "Круглосуточно 24/7"),
                 place_dict.get("night_vibe", "Отличное место для ночного чилла"),
@@ -246,7 +249,7 @@ def auto_update_and_expand_places() -> Tuple[int, int]:
 # ---------------- НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ ----------------
 
 def set_user_distance_filter(user_id: int, distance_filter: str):
-    """Установить фильтр максимального расстояния (15, 25, 35, 50)."""
+    """Установить фильтр максимального расстояния (20, 30, 40, 50, 60)."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -260,14 +263,14 @@ def set_user_distance_filter(user_id: int, distance_filter: str):
 
 
 def get_user_distance_filter(user_id: int) -> str:
-    """Получить текущий фильтр расстояния (по умолчанию '50' км)."""
+    """Получить текущий фильтр расстояния (по умолчанию '60' км)."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT distance_filter FROM user_settings WHERE user_id = ?", (user_id,))
         row = cursor.fetchone()
-        val = row[0] if row and row[0] else "50"
-        if val in ("all", "80", "100+"):
-            val = "50"
+        val = row[0] if row and row[0] else "60"
+        if val in ("all", "80", "100+", "15"):
+            val = "60"
         return val
 
 
@@ -418,7 +421,7 @@ def get_user_stats(user_id: int) -> Dict[str, Any]:
         """, (user_id,))
         categories = [r[0] for r in cursor.fetchall()]
 
-        cursor.execute("SELECT COUNT(*) FROM places WHERE distance_km <= 50")
+        cursor.execute("SELECT COUNT(*) FROM places WHERE distance_km <= 60")
         total_available = cursor.fetchone()[0]
     
     liked_count = counts.get("liked", 0)
@@ -458,7 +461,7 @@ def get_next_smart_place(user_id: int) -> Optional[Dict[str, Any]]:
     """
     Интеллектуальный подбор следующей локации:
     1. Исключает просмотренные (лайкнутые, пропущенные И отмеченные как 'visited' - «Был здесь»).
-    2. Строго соблюдает числовой фильтр расстояния: distance_km <= max_km (строго <= 50 км!).
+    2. Строго соблюдает числовой фильтр расстояния: distance_km <= max_km (с шагом 20, 30, 40, 50, до 60 км!).
     3. При фильтре 'night' (по умолчанию) выбирает ТОЛЬКО круглосуточные места (is_24_7 == 1) с открытым въездом!
     4. Учитывает выбранную географическую зону севера СПб и области.
     5. Ранжирует в пользу секретных точек (popularity: 'secret', 'hidden') и комфортного авто-чилла (car_chill == 1).
@@ -487,14 +490,14 @@ def get_next_smart_place(user_id: int) -> Optional[Dict[str, Any]]:
     zone_filter = get_user_zone_filter(user_id)
     
     try:
-        max_dist_km = min(int(dist_filter_str), 50)
+        max_dist_km = min(int(dist_filter_str), 60)
     except Exception:
-        max_dist_km = 50
+        max_dist_km = 60
 
     # 1. Отсеиваем уже увиденные и посещенные места
     candidates = [p for p in all_places if p["id"] not in seen_ids]
     
-    # 2. Строгий фильтр по дальности (никаких мест дальше выбранного радиуса, и не больше 50 км!)
+    # 2. Строгий фильтр по дальности (никаких мест дальше выбранного радиуса, и не больше 60 км!)
     candidates = [p for p in candidates if p["distance_km"] <= max_dist_km]
     
     # 3. Фильтр по времени суток
@@ -517,14 +520,14 @@ def get_next_smart_place(user_id: int) -> Optional[Dict[str, Any]]:
     def score_place(place: Dict[str, Any]) -> float:
         score = 10.0
         
-        # Огромный приоритет секретным и небанальным спотам
+        # Приоритет секретным и небанальным спотам
         pop = place.get("popularity", "hidden")
         if pop == "secret":
             score += 25.0
         elif pop == "hidden":
             score += 15.0
             
-        # Огромный приоритет авто-чиллу (постоять в машине, вид, покурить)
+        # Приоритет авто-чиллу (постоять в машине, вид, покурить)
         if place.get("car_chill", 0) == 1:
             score += 20.0
             
