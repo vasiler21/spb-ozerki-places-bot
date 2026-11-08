@@ -1,16 +1,165 @@
 # -*- coding: utf-8 -*-
 """
-Каталог атмосферных локаций севера Санкт-Петербурга и Ленинградской области.
-Фокус: Север СПб, Курортный район, Карельский перешеек, Дамба, Кронштадт, Всеволожск.
-Все локации строго в радиусе до 60 км от м. Озерки / севера города!
-Особое внимание:
-- Дистанции от 2 до 60 км (с шагом 20, 30, 40, 50, 60 км).
-- Доступность 24/7 (открытый въезд, без шлагбаумов и закрытых ворот).
-- Споты для ночного авто-чилла: постоять у воды/на обрыве, покурить, послушать музыку, расслабиться.
-- Скрытые, небанальные и не перегруженные людьми точки.
+Каталог атмосферных локаций Санкт-Петербурга и Ленинградской области.
+Поддерживает динамический расчет расстояния и времени от любой выбранной станции метро.
 """
 
-# Категории
+import math
+import re
+from typing import Tuple, Dict, Any, List
+
+# Метро и опорные точки старта
+METRO_STATIONS = {
+    "ozerki": {
+        "id": "ozerki",
+        "name": "м. Озерки",
+        "short_name": "Озерки",
+        "line": "🔵 Синяя линия",
+        "lat": 60.0371,
+        "lon": 30.3162,
+        "hint": "Выборгское ш., КАД, Скандинавия"
+    },
+    "grazhdansky_pr": {
+        "id": "grazhdansky_pr",
+        "name": "м. Гражданский проспект",
+        "short_name": "Гражданский пр.",
+        "line": "🔴 Красная линия",
+        "lat": 60.0402,
+        "lon": 30.4182,
+        "hint": "Мурино, КАД Восток, Токсово"
+    },
+    "prosp_prosveshcheniya": {
+        "id": "prosp_prosveshcheniya",
+        "name": "м. Проспект Просвещения",
+        "short_name": "Пр. Просвещения",
+        "line": "🔵 Синяя линия",
+        "lat": 60.0514,
+        "lon": 30.3323,
+        "hint": "Выезд на КАД и Выборг"
+    },
+    "parnas": {
+        "id": "parnas",
+        "name": "м. Парнас",
+        "short_name": "Парнас",
+        "line": "🔵 Синяя линия",
+        "lat": 60.0669,
+        "lon": 30.3340,
+        "hint": "Прямой выезд на КАД и А-121 «Сортавала»"
+    },
+    "komendantsky_pr": {
+        "id": "komendantsky_pr",
+        "name": "м. Комендантский проспект",
+        "short_name": "Комендантский пр.",
+        "line": "🟣 Фиолетовая линия",
+        "lat": 60.0084,
+        "lon": 30.2587,
+        "hint": "Приморский р-н, ЗСД, Приморское ш."
+    },
+    "begovaya": {
+        "id": "begovaya",
+        "name": "м. Беговая",
+        "short_name": "Беговая",
+        "line": "🟢 Зеленая линия",
+        "lat": 59.9873,
+        "lon": 30.2016,
+        "hint": "Парк 300-летия, Приморское ш., Дамба"
+    },
+    "akademicheskaya": {
+        "id": "akademicheskaya",
+        "name": "м. Академическая",
+        "short_name": "Академическая",
+        "line": "🔴 Красная линия",
+        "lat": 60.0128,
+        "lon": 30.3961,
+        "hint": "Гражданка, Пискаревка, Восток ЛО"
+    },
+    "pionerskaya": {
+        "id": "pionerskaya",
+        "name": "м. Пионерская",
+        "short_name": "Пионерская",
+        "line": "🔵 Синяя линия",
+        "lat": 60.0026,
+        "lon": 30.2968,
+        "hint": "Коломяжский пр., Удельная"
+    },
+    "devyatkino": {
+        "id": "devyatkino",
+        "name": "м. Девяткино",
+        "short_name": "Девяткино",
+        "line": "🔴 Красная линия",
+        "lat": 60.0501,
+        "lon": 30.4431,
+        "hint": "Выезд в Токсово, Кавголово, Ладогу"
+    },
+    "chernaya_rechka": {
+        "id": "chernaya_rechka",
+        "name": "м. Черная речка",
+        "short_name": "Черная речка",
+        "line": "🔵 Синяя линия",
+        "lat": 59.9855,
+        "lon": 30.3008,
+        "hint": "Приморский пр., Выборгская наб."
+    },
+    "staraya_derevnya": {
+        "id": "staraya_derevnya",
+        "name": "м. Старая Деревня",
+        "short_name": "Старая Деревня",
+        "line": "🟣 Фиолетовая линия",
+        "lat": 59.9894,
+        "lon": 30.2552,
+        "hint": "Приморский р-н, выезд на ЗСД"
+    },
+    "petrogradskaya": {
+        "id": "petrogradskaya",
+        "name": "м. Петроградская",
+        "short_name": "Петроградская",
+        "line": "🔵 Синяя линия",
+        "lat": 59.9663,
+        "lon": 30.3113,
+        "hint": "Петроградская сторона, центр"
+    }
+}
+DEFAULT_METRO_ID = "ozerki"
+
+def haversine_distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Вычисление расстояния между координатами с коэффициентом дорожной сети ~1.28."""
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2) ** 2 +
+         math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
+         math.sin(dlon / 2) ** 2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return round(R * c * 1.28, 1)
+
+def estimate_car_time(dist_km: float) -> str:
+    """Оценка времени в пути на авто с учетом выезда из города и трассы."""
+    if dist_km <= 15:
+        mins = int(dist_km * 1.5) + 5
+    elif dist_km <= 35:
+        mins = int(dist_km * 1.2) + 5
+    else:
+        mins = int(dist_km * 1.0) + 5
+    if mins < 60:
+        return f"~{mins} мин"
+    hours = mins // 60
+    rem = mins % 60
+    return f"~{hours} ч {rem} мин" if rem > 0 else f"~{hours} ч"
+
+def find_nearest_metro(lat: float, lon: float) -> Tuple[str, Dict[str, Any], float]:
+    """Находит ближайшую станцию метро по координатам пользователя."""
+    nearest_id = DEFAULT_METRO_ID
+    nearest_data = METRO_STATIONS[DEFAULT_METRO_ID]
+    min_dist = float("inf")
+    for mid, mdata in METRO_STATIONS.items():
+        d = haversine_distance_km(lat, lon, mdata["lat"], mdata["lon"])
+        if d < min_dist:
+            min_dist = d
+            nearest_id = mid
+            nearest_data = mdata
+    return nearest_id, nearest_data, min_dist
+
+# Категории локаций
 CATEGORY_NAMES = {
     "night_chill": "🌙 Авто-чилл, тишина и огни ночи",
     "viewpoint": "🔭 Панорамные смотровые и Дамба",
@@ -19,7 +168,7 @@ CATEGORY_NAMES = {
     "architecture": "🏰 Форты, старинные дачи и кирхи"
 }
 
-# Зоны (с фокусом на север города и область)
+# Географические направления
 ZONE_NAMES = {
     "all_north": "🌲 Весь Север СПб и ЛО",
     "kurortny": "🌊 Курортный р-н (Залив: Сестрорецк, Комарово, Зеленогорск)",
@@ -29,21 +178,22 @@ ZONE_NAMES = {
     "vsevolozhsk_ladoga": "🌊 Всеволожск и Ладожское озеро"
 }
 
-# Фильтры расстояния (с шагом 20, 30, 40, 50, до 60 км!)
+# Фильтры расстояния (с шагом 20, 30, 40, 50, до 60 км)
 DISTANCE_GROUPS = {
     "20": "🚗 До 20 км (быстрый выезд, 15-25 мин)",
-    "30": "🚗 До 30 км (Разлив, Медное, Токсово, ~30 мин)",
-    "40": "🌲 До 40 км (Репино, Комарово, Дамба, Лемболово, ~40 мин)",
-    "50": "🌊 До 50 км (Зеленогорск, Рощино, форт Шанц, Осиновец, ~50 мин)",
-    "60": "🗺️ До 60 км (Приветнинское, Смолячково, Сосново, ~1 час)"
+    "30": "🚗 До 30 км (ближний пригород, ~30 мин)",
+    "40": "🌲 До 40 км (побережье и озера, ~40 мин)",
+    "50": "🌊 До 50 км (дальний берег, Ладога, ~50 мин)",
+    "60": "🗺️ До 60 км (максимальный выезд, ~1 час)"
 }
 
-# Временные фильтры
+# Временные фильтры: подбор под атмосферу и красоту времени суток
 TIME_FILTERS = {
-    "night": "🌙 Ночные споты 24/7 (въезд открыт ночью)",
-    "sunset": "🌅 Закат и вечер (огни и закат на воде)",
-    "day": "☀️ Дневные (парки, экотропы)",
-    "all": "🌐 Любое время"
+    "night": "🌙 Ночь — огни, авто-чилл (24/7)",
+    "sunset": "🌅 Вечер и закат — панорамы у воды",
+    "day": "☀️ День — экотропы, природа, лес",
+    "morning": "🌄 Утро и рассвет — туман и тишина",
+    "all": "🌐 Любое время — все локации"
 }
 
 PLACES = [
@@ -65,7 +215,13 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Приморскому ш. до Лисьего Носа, далее 200 м ровной грунтовки к причалу. Свободный проезд 24/7.",
         "photo_tips": "Огни ночного Петербурга и Лахта Центра над гладью залива, силуэт причала.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.01639,60.01389&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.01639,60.01389&z=15&l=map",
+        "lon": 30.01639,
+        "lat": 60.01389,
+        "best_times": [
+            "night",
+            "sunset"
+        ]
     },
     {
         "id": "sestroretsk_kurort_beach",
@@ -85,7 +241,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт через Сестрорецк (ул. Пляжная / Малая Ленинградская), парковка в тупике у сосен. Проезд 24/7.",
         "photo_tips": "Одинокие сосны на песке на фоне темной воды, полоса прибоя в лунном свете.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.9575,60.1098&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.9575,60.1098&z=15&l=map",
+        "lon": 29.9575,
+        "lat": 60.1098,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "razliv_shalash_embankment",
@@ -105,7 +268,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Идеальный асфальт по Дороге к Шалашу Ленина до кольца у воды. Парковка прямо у озера.",
         "photo_tips": "Отражения ночных огней в зеркальной воде Разлива, туман над камышами на рассвете.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.025,60.078&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.025,60.078&z=15&l=map",
+        "lon": 30.025,
+        "lat": 60.078,
+        "best_times": [
+            "night",
+            "sunset",
+            "morning"
+        ]
     },
     {
         "id": "razliv_times_pier",
@@ -125,7 +295,15 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Тарховской улице, съезд к лодочной станции. Проезд открыт круглые сутки.",
         "photo_tips": "Деревянный пирс, уходящий в темноту озера, легкая дымка над водой.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.998,60.0885&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.998,60.0885&z=15&l=map",
+        "lon": 29.998,
+        "lat": 60.0885,
+        "best_times": [
+            "night",
+            "sunset",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "tarkhovka_cape_view",
@@ -145,7 +323,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Приморское шоссе, съезд на Советский проспект в Тарховке, стоянка у тропы к заливу.",
         "photo_tips": "Вид на огни Кронштадтской дамбы сквозь сосновые ветви.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.985,60.065&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.985,60.065&z=15&l=map",
+        "lon": 29.985,
+        "lat": 60.065,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "sestroretsk_dubki_outer",
@@ -165,7 +350,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Дубковскому шоссе до стоянки у залива. Проезд свободный.",
         "photo_tips": "Вековые дубы на берегу ночного залива, огни Кронштадта на горизонте.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.945,60.088&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.945,60.088&z=15&l=map",
+        "lon": 29.945,
+        "lat": 60.088,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "solnechnoe_dunes_quiet",
@@ -185,7 +377,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт до Солнечного, затем 300 м укатанной песчано-лесной дорожки. Проедет любой седан.",
         "photo_tips": "Причудливые изогнутые сосны на вершине песчаного бархана на фоне заката.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.932,60.147&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.932,60.147&z=15&l=map",
+        "lon": 29.932,
+        "lat": 60.147,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "solnechnoe_laskovy_outer",
@@ -205,7 +404,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по ул. Петровской до парковочных карманов у соснового бора.",
         "photo_tips": "Широкая полоса песка и морская пена в свете луны.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.921,60.1495&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.921,60.1495&z=15&l=map",
+        "lon": 29.921,
+        "lat": 60.1495,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "repino_rocky_cape",
@@ -225,7 +431,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальтированные карманы вдоль Приморского шоссе в Репино. Проход к камням 50 метров.",
         "photo_tips": "Темные валуны в полосе белой пены прибоя, отблески луны на воде.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.865,60.165&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.865,60.165&z=15&l=map",
+        "lon": 29.865,
+        "lat": 60.165,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "repino_chukovsky_beach",
@@ -245,7 +458,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Нагорной и Кленовой улицам к прибрежному проезду. Стоянка у сосен.",
         "photo_tips": "Старые сосны у самой кромки воды на фоне вечерней зари.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.852,60.168&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.852,60.168&z=15&l=map",
+        "lon": 29.852,
+        "lat": 60.168,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "komarovo_sea_street",
@@ -265,7 +485,13 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт прямо до прибрежной парковки в створе Морской улицы. Доступ свободный 24/7.",
         "photo_tips": "Широкий темный залив, силуэты сосен на песчаном откосе.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.805,60.182&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.805,60.182&z=15&l=map",
+        "lon": 29.805,
+        "lat": 60.182,
+        "best_times": [
+            "night",
+            "sunset"
+        ]
     },
     {
         "id": "komarovo_shchuchye_lake",
@@ -285,7 +511,15 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Озерной ул. Комарово до парковки у шлагбаума заказника. Дальше 150 м пешком.",
         "photo_tips": "Отражение звездного неба в неподвижной черной воде лесного озера.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.785,60.21&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.785,60.21&z=15&l=map",
+        "lon": 29.785,
+        "lat": 60.21,
+        "best_times": [
+            "night",
+            "sunset",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "komarovo_ecotrail_deadend",
@@ -305,7 +539,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Большому проспекту Комарово до Морской ул., тихий карман у леса.",
         "photo_tips": "Свет автомобильных фар, пробивающий сосновый бор.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.812,60.186&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.812,60.186&z=15&l=map",
+        "lon": 29.812,
+        "lat": 60.186,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "zelenogorsk_yacht_pier",
@@ -325,7 +566,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт через Зеленогорск до Гаванной улицы, парковка прямо у набережной и мола.",
         "photo_tips": "Ночные огни залива, силуэт маяка и фонари гавани.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.702,60.191&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.702,60.191&z=15&l=map",
+        "lon": 29.702,
+        "lat": 60.191,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "zelenogorsk_golden_beach_far",
@@ -345,7 +593,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Пляжевой улице Зеленогорска до парковки у берега.",
         "photo_tips": "Песчаная гладь пляжа в ночной подсветке фонарей парка.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.689,60.193&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.689,60.193&z=15&l=map",
+        "lon": 29.689,
+        "lat": 60.193,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "zelenogorsk_lutheran_church_square",
@@ -365,7 +620,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по проспекту Ленина в центре Зеленогорска. Просторная парковка у сквера.",
         "photo_tips": "Подсвеченный шпиль кирхи на фоне темного неба и сосновых ветвей.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.705,60.198&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.705,60.198&z=15&l=map",
+        "lon": 29.705,
+        "lat": 60.198,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "ushkovo_coastal_terrace",
@@ -385,7 +647,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Приморское шоссе, съезды в сосновые карманы между Ушково и Серово.",
         "photo_tips": "Панорама залива с высокого соснового обрыва, силуэты деревьев на фоне вечерней зари.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.645,60.203&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.645,60.203&z=15&l=map",
+        "lon": 29.645,
+        "lat": 60.203,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "ushkovo_det_sanatorium_shore",
@@ -405,7 +674,13 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Пляжевой ул. пос. Ушково, тупиковый проезд к сосняку.",
         "photo_tips": "Силуэт одинокой сосны на крутом песчаном склоне над заливом.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.662,60.201&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.662,60.201&z=15&l=map",
+        "lon": 29.662,
+        "lat": 60.201,
+        "best_times": [
+            "night",
+            "sunset"
+        ]
     },
     {
         "id": "serovo_black_river_mouth",
@@ -425,7 +700,15 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Приморскому шоссе до моста через р. Черную, парковочный карман у сосняка.",
         "photo_tips": "Деревянные мостки над рекой, впадающей в залив, высокие песчаные дюны.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.565,60.198&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.565,60.198&z=15&l=map",
+        "lon": 29.565,
+        "lat": 60.198,
+        "best_times": [
+            "night",
+            "sunset",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "serovo_vampelsuu_dunes",
@@ -445,7 +728,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Приморское шоссе за мостом через Черную речку, съезды на песчаные площадки.",
         "photo_tips": "Вид с вершины высокой дюны на темную морскую гладь.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.548,60.196&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.548,60.196&z=15&l=map",
+        "lon": 29.548,
+        "lat": 60.196,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "smolyachkovo_granite_bay",
@@ -465,7 +755,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Приморское шоссе через Смолячково, съезд по лесной дорожке к заливу (150 м).",
         "photo_tips": "Огромные гранитные валуны в полосе прибоя под ночным небом.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.498,60.179&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.498,60.179&z=15&l=map",
+        "lon": 29.498,
+        "lat": 60.179,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "privetninskoe_bay_pines",
@@ -485,7 +782,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Приморское шоссе, поворот перед Приветнинским на лесную дорожку к заливу (200 м). Проезд свободный круглые сутки.",
         "photo_tips": "Гранитные камни в волнах залива, силуэты сосен на фоне ночного неба.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.475,60.185&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.475,60.185&z=15&l=map",
+        "lon": 29.475,
+        "lat": 60.185,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "privetninskoe_fort_inno_edge",
@@ -505,7 +809,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Приморское шоссе -> пос. Приветнинское, съезд к побережью по асфальту и накатанной грунтовке.",
         "photo_tips": "Остатки циклопических бетонных батарей на фоне морского горизонта.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.385,60.162&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.385,60.162&z=15&l=map",
+        "lon": 29.385,
+        "lat": 60.162,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "peski_rocky_shore",
@@ -525,7 +836,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Приморское шоссе до пос. Пески, съезды в сосновый бор к пляжу.",
         "photo_tips": "Широкая морская панорама и сосны на песке под звездами.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.325,60.182&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.325,60.182&z=15&l=map",
+        "lon": 29.325,
+        "lat": 60.182,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "damba_culvert_v4",
@@ -545,7 +863,13 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Съезд с КАД (внутреннее или внешнее кольцо) в технологические карманы у водопропускных сооружений. Асфальт.",
         "photo_tips": "Бесконечная прямая трасса КАД, уходящая в море, гранитные молы и волны.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.91,60.035&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.91,60.035&z=15&l=map",
+        "lon": 29.91,
+        "lat": 60.035,
+        "best_times": [
+            "night",
+            "sunset"
+        ]
     },
     {
         "id": "damba_culvert_v5",
@@ -565,7 +889,13 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Съезд с КАД на техническую площадку моста В-5. Проезд открыт всегда.",
         "photo_tips": "Брызги прибоя на гранитных молах в свете фонарей КАД.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.87,60.022&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.87,60.022&z=15&l=map",
+        "lon": 29.87,
+        "lat": 60.022,
+        "best_times": [
+            "night",
+            "sunset"
+        ]
     },
     {
         "id": "damba_culvert_v3",
@@ -585,7 +915,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Съезд с внутреннего кольца КАД у водопропускника В-3.",
         "photo_tips": "Огни Петербурга и Лахта-Центра, сияющие над морской гладью.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.955,60.048&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.955,60.048&z=15&l=map",
+        "lon": 29.955,
+        "lat": 60.048,
+        "best_times": [
+            "night",
+            "sunset",
+            "morning"
+        ]
     },
     {
         "id": "damba_shipgate_s1",
@@ -605,7 +942,13 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Съезд с КАД перед въездом в тоннель под фарватером на разворотную петлю и стоянку.",
         "photo_tips": "Светящиеся громады судов на фарватере в ночи, мощные конструкции гидросооружений.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.805,59.989&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.805,59.989&z=15&l=map",
+        "lon": 29.805,
+        "lat": 59.989,
+        "best_times": [
+            "night",
+            "sunset"
+        ]
     },
     {
         "id": "gorskaya_dam_start_view",
@@ -625,7 +968,13 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Развязка КАД и Приморского шоссе в Горской, смотровой карман.",
         "photo_tips": "Начало полосы дамбы, уходящей в ночное море.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.985,60.038&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.985,60.038&z=15&l=map",
+        "lon": 29.985,
+        "lat": 60.038,
+        "best_times": [
+            "night",
+            "sunset"
+        ]
     },
     {
         "id": "kronstadt_fort_shantz",
@@ -645,7 +994,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт через Кронштадт по Кронштадтскому шоссе прямо до тупиковой парковки у форта.",
         "photo_tips": "Вспышки маяка Толбухин на темном горизонте моря, своды старых казематов.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.675,60.026&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.675,60.026&z=15&l=map",
+        "lon": 29.675,
+        "lat": 60.026,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "kronstadt_fort_reef_shore",
@@ -665,7 +1021,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт до форта Шанц, далее пешая тропа по песчаной косе к форту Риф.",
         "photo_tips": "Острый песчаный мыс, уходящий в ночное море.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.645,60.032&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.645,60.032&z=15&l=map",
+        "lon": 29.645,
+        "lat": 60.032,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "kronstadt_west_pier_tetrapods",
@@ -685,7 +1048,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт через Кронштадт до кольца у форта Шанц, съезд к волноломам.",
         "photo_tips": "Бетонные гигантские тетраподы на фоне ночных волн залива.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.68,60.022&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.68,60.022&z=15&l=map",
+        "lon": 29.68,
+        "lat": 60.022,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "kronstadt_fort_constantine_outer",
@@ -705,7 +1075,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Съезд с КАД на форт Константин, внешняя бесплатная стоянка у залива.",
         "photo_tips": "Подсвеченный силуэт форта Чумный на темной воде залива.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.705,59.992&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.705,59.992&z=15&l=map",
+        "lon": 29.705,
+        "lat": 59.992,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "kronstadt_merchants_harbor",
@@ -725,7 +1102,13 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт до улицы Комсомола / набережной, парковка у сквера прямо перед водой.",
         "photo_tips": "Силуэты военных кораблей и навигационных знаков на фоне ночного неба.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.771,59.988&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.771,59.988&z=15&l=map",
+        "lon": 29.771,
+        "lat": 59.988,
+        "best_times": [
+            "night",
+            "sunset"
+        ]
     },
     {
         "id": "kronstadt_italian_pond",
@@ -745,7 +1128,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт до Макаровской ул., парковка у Итальянского пруда.",
         "photo_tips": "Отражения старинных фонарей в зеркальной глади Итальянского пруда.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.765,59.9895&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.765,59.9895&z=15&l=map",
+        "lon": 29.765,
+        "lat": 59.9895,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "kronstadt_petrovsky_park_pier",
@@ -765,7 +1155,13 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по ул. Красной до Петровского парка, парковка у пристани.",
         "photo_tips": "Якоря петровской эпохи на гранитной набережной в ночном свете.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.768,59.9875&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.768,59.9875&z=15&l=map",
+        "lon": 29.768,
+        "lat": 59.9875,
+        "best_times": [
+            "night",
+            "sunset"
+        ]
     },
     {
         "id": "kavgolovo_lake_viewpoint",
@@ -785,7 +1181,15 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Токсовскому шоссе, съезд к ж/д станции Кавголово или на холмы у базы СКА.",
         "photo_tips": "Панорама озера с высоты соснового холма, косые лучи заката над водой.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.505,60.165&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.505,60.165&z=15&l=map",
+        "lon": 30.505,
+        "lat": 60.165,
+        "best_times": [
+            "night",
+            "sunset",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "kavgolovo_venera_beach",
@@ -805,7 +1209,15 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт через Токсово до ж/д ст. Кавголово, накатанная песчаная дорожка на косу.",
         "photo_tips": "Песчаная коса в ночном свете, вода по обе стороны дороги.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.518,60.172&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.518,60.172&z=15&l=map",
+        "lon": 30.518,
+        "lat": 60.172,
+        "best_times": [
+            "night",
+            "sunset",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "hepoyarvi_north_cape",
@@ -825,7 +1237,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт до Токсово, далее 1 км укатанной лесной песчаной дороги. Легковые авто проезжают спокойно.",
         "photo_tips": "Сосны на песчаном обрыве над темной водой, мостки для купания в тумане.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.565,60.178&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.565,60.178&z=15&l=map",
+        "lon": 30.565,
+        "lat": 60.178,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "hepoyarvi_south_pier",
@@ -845,7 +1264,15 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Санаторной ул. Токсово до тупика у озера.",
         "photo_tips": "Темное зеркало озера в окружении хвойного леса под звездным куполом.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.548,60.158&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.548,60.158&z=15&l=map",
+        "lon": 30.548,
+        "lat": 60.158,
+        "best_times": [
+            "night",
+            "sunset",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "toksovo_mikhail_church_hill",
@@ -865,7 +1292,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт прямо на вершину холма к парковке собора. Проезд свободный круглые сутки.",
         "photo_tips": "Подсвеченный деревянный храм на фоне черного звездного неба, панорама холмов.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.528,60.153&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.528,60.153&z=15&l=map",
+        "lon": 30.528,
+        "lat": 60.153,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "mednoye_lake_pine_shore",
@@ -885,7 +1319,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Выборгскому шоссе до пос. Медный Завод, асфальтированные и грунтовые съезды к озеру.",
         "photo_tips": "Рыжевато-янтарная вода у песчаного берега, силуэты сосен на фоне ночного неба.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.138,60.198&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.138,60.198&z=15&l=map",
+        "lon": 30.138,
+        "lat": 60.198,
+        "best_times": [
+            "night",
+            "sunset",
+            "morning"
+        ]
     },
     {
         "id": "mednoye_lake_far_bay",
@@ -905,7 +1346,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Выборгское шоссе, поворот на Медный Завод, объездная грунтовка вдоль озера.",
         "photo_tips": "Песчаная отмель, уходящая в янтарную воду озера под луной.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.125,60.203&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.125,60.203&z=15&l=map",
+        "lon": 30.125,
+        "lat": 60.203,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "sarzhenskoe_lake_quiet",
@@ -925,7 +1373,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Выборгское шоссе, поворот на Сертолово-2, далее лесная грунтовка к северному берегу.",
         "photo_tips": "Деревянные мостки рыбаков над спокойной гладью воды под звездами.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.175,60.173&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.175,60.173&z=15&l=map",
+        "lon": 30.175,
+        "lat": 60.173,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "pastorskoe_lake_night",
@@ -945,7 +1400,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Съезд с Выборгского шоссе на 39-м км, укатанная песчаная стоянка прямо у воды.",
         "photo_tips": "Сосны у кромки песчаного берега, вечерний туман над водой.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.045,60.228&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.045,60.228&z=15&l=map",
+        "lon": 30.045,
+        "lat": 60.228,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "sertolovo_svetloe_lake",
@@ -965,7 +1427,15 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Выборгское шоссе, поворот на Сертолово, 500 м хорошей лесной дорожки.",
         "photo_tips": "Отражения сосновых верхушек в ночной воде озера.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.22,60.145&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.22,60.145&z=15&l=map",
+        "lon": 30.22,
+        "lat": 60.145,
+        "best_times": [
+            "night",
+            "sunset",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "vartemyagi_park_river",
@@ -985,7 +1455,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт через Вартемяги (Приозерское ш.), стоянка у парка и храма Святых Веры, Надежды, Любови.",
         "photo_tips": "Деревянный мостик над быстрой речкой Охта среди темного парка.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.325,60.178&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.325,60.178&z=15&l=map",
+        "lon": 30.325,
+        "lat": 60.178,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "lembolovo_south_beach",
@@ -1005,7 +1482,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Скоростная трасса Сортавала, съезд на Керро, 500 м хорошей грунтовки к берегу озера.",
         "photo_tips": "Огромное зеркало Лемболовского озера в сумерках, сосновые силуэты.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.345,60.315&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.345,60.315&z=15&l=map",
+        "lon": 30.345,
+        "lat": 60.315,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "lembolovo_vun_river_cape",
@@ -1025,7 +1509,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Трасса А-121 Сортавала -> съезд на Лемболово, лесная укатанная дорога.",
         "photo_tips": "Песчаный обрыв над слиянием рек, сосны на краю кручи.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.365,60.338&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.365,60.338&z=15&l=map",
+        "lon": 30.365,
+        "lat": 60.338,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "vaskelovo_lake_cape",
@@ -1045,7 +1536,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Шоссе А-121 до развязки на Васкелово, съезд к озеру по поселковой дороге.",
         "photo_tips": "Мыс с соснами, уходящий в темную гладь ночного озера.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.355,60.365&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.355,60.365&z=15&l=map",
+        "lon": 30.355,
+        "lat": 60.365,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "krasavitsa_lake_cliff",
@@ -1065,7 +1563,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Трасса «Скандинавия» до поворота на Ильичево, далее асфальт и 300 м накатанной песчаной дорожки.",
         "photo_tips": "Вид с высокого песчаного утеса сквозь стволы сосен на лунную дорожку на озере.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.788889,60.258889&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.788889,60.258889&z=15&l=map",
+        "lon": 29.788889,
+        "lat": 60.258889,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "krasavitsa_lake_beach_south",
@@ -1085,7 +1590,15 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт через пос. Ильичево до стоянки у пляжа.",
         "photo_tips": "Золотистый песок у чистой прозрачной воды озера под лунным светом.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.798,60.252&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.798,60.252&z=15&l=map",
+        "lon": 29.798,
+        "lat": 60.252,
+        "best_times": [
+            "night",
+            "sunset",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "dlinnoe_lake_ilichevo",
@@ -1105,7 +1618,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Через пос. Ильичево, лесная дорога вдоль восточного берега озера.",
         "photo_tips": "Идеально гладкая гладь воды, отражающая крутые холмы и сосны.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.765,60.278&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.765,60.278&z=15&l=map",
+        "lon": 29.765,
+        "lat": 60.278,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "roshchino_dam_waterfront",
@@ -1125,7 +1645,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Отличный асфальт через центр Рощино прямо до парковки у плотины и парка.",
         "photo_tips": "Бурлящие струи воды на плотине в ночном свете, деревянные пирсы набережной.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.608,60.252&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.608,60.252&z=15&l=map",
+        "lon": 29.608,
+        "lat": 60.252,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "roshchino_lake_pines",
@@ -1145,7 +1672,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Советской ул. Рощино, съезд к сосняку у озера.",
         "photo_tips": "Вид сквозь сосновые стволы на широкое зеркало озера.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.615,60.258&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.615,60.258&z=15&l=map",
+        "lon": 29.615,
+        "lat": 60.258,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "lindulovskaya_grove_bridge",
@@ -1165,7 +1699,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт от Рощино к Линдуловской роще до моста и парковки.",
         "photo_tips": "Бурный поток реки Рощинки среди исполинских вековых лиственниц.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.542,60.238&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.542,60.238&z=15&l=map",
+        "lon": 29.542,
+        "lat": 60.238,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "gladyshevskoe_lake_shore",
@@ -1185,7 +1726,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Трасса «Скандинавия» -> поворот на Поляны / Тарасово, лесная дорога к озеру.",
         "photo_tips": "Широкое озерное зеркало в обрамлении хвойных лесов на закате.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.485,60.285&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.485,60.285&z=15&l=map",
+        "lon": 29.485,
+        "lat": 60.285,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "sosnovo_razdolinskoe_lake",
@@ -1205,7 +1753,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Трасса А-121 Сортавала -> съезд на Сосново, асфальт до озера.",
         "photo_tips": "Карельские холмы и сосны над прозрачной водой Раздолинского озера.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.228,60.552&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.228,60.552&z=15&l=map",
+        "lon": 30.228,
+        "lat": 60.552,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "ozerki_upper_lake_cape",
@@ -1225,7 +1780,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Береговой или Большой Озерной улице, тупиковый подъезд прямо к берегу озера.",
         "photo_tips": "Огни ночного Выборгского шоссе, отражающиеся в воде Суздальского озера.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.309,60.038&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.309,60.038&z=15&l=map",
+        "lon": 30.309,
+        "lat": 60.038,
+        "best_times": [
+            "night",
+            "sunset",
+            "morning"
+        ]
     },
     {
         "id": "ozerki_middle_lake_pier",
@@ -1245,7 +1807,13 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт через частный сектор Шувалово до набережной Среднего озера.",
         "photo_tips": "Ночные огни высоток, отражающиеся в темной озерной воде.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.302,60.031&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.302,60.031&z=15&l=map",
+        "lon": 30.302,
+        "lat": 60.031,
+        "best_times": [
+            "night",
+            "sunset"
+        ]
     },
     {
         "id": "ozerki_lower_lake_shore",
@@ -1265,7 +1833,15 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Выборгское шоссе, съезды по ул. Староорловской к берегу Нижнего озера.",
         "photo_tips": "Отражения огней Выборгского шоссе в широком водном зеркале озера.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.295,60.045&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.295,60.045&z=15&l=map",
+        "lon": 30.295,
+        "lat": 60.045,
+        "best_times": [
+            "night",
+            "sunset",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "lakhta_night_waterfront",
@@ -1285,7 +1861,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Приморскому шоссе / ул. Савушкина, парковка у Лахтинского пассажа или набережной.",
         "photo_tips": "Вертикальный кадр светящегося шпиля Лахта-Центра, отражения подсветки в воде.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.177,59.987&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.177,59.987&z=15&l=map",
+        "lon": 30.177,
+        "lat": 59.987,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "park_300_letiya_night_view",
@@ -1305,7 +1888,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Приморскому проспекту, парковка у Питерлэнда.",
         "photo_tips": "Сияющий стадион Газпром Арена и мост ЗСД над ночной водой залива.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.205,59.982&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.205,59.982&z=15&l=map",
+        "lon": 30.205,
+        "lat": 59.982,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "krestovsky_night_promenade",
@@ -1325,7 +1915,13 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Северной дороге Крестовского острова прямо к набережной.",
         "photo_tips": "Вантовый мост ЗСД и огни Лахта-Центра с Крестовского острова.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.218,59.978&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.218,59.978&z=15&l=map",
+        "lon": 30.218,
+        "lat": 59.978,
+        "best_times": [
+            "night",
+            "sunset"
+        ]
     },
     {
         "id": "poroshkino_panoramic_hill",
@@ -1345,7 +1941,13 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт через пос. Порошкино, карман на возвышенности с открытым видом на юг.",
         "photo_tips": "Таймлапс или фото с длинной выдержкой: световые полосы от фар машин на фоне горизонта.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.345,60.098&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.345,60.098&z=15&l=map",
+        "lon": 30.345,
+        "lat": 60.098,
+        "best_times": [
+            "night",
+            "sunset"
+        ]
     },
     {
         "id": "yukki_hills_view",
@@ -1365,7 +1967,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Отличный асфальт через Юкки прямо до парковки у озера. Проезд открыт всегда.",
         "photo_tips": "Вид сверху холма на зеркало Тохколодского озера в обрамлении хвойных крон.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.295278,60.111111&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.295278,60.111111&z=15&l=map",
+        "lon": 30.295278,
+        "lat": 60.111111,
+        "best_times": [
+            "night",
+            "sunset",
+            "morning"
+        ]
     },
     {
         "id": "orlovsky_quarry_night",
@@ -1385,7 +1994,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Орлово-Денисовскому проспекту или Суздальскому шоссе, далее укатанный съезд к соснам.",
         "photo_tips": "Отражение луны в глади карьера, песчаные дюны среди сосен.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.265,60.045&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.265,60.045&z=15&l=map",
+        "lon": 30.265,
+        "lat": 60.045,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "shuvalovsky_quarry_west",
@@ -1405,7 +2021,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по ул. Парашютной, съезд к карьеру по укатанной грунтовке.",
         "photo_tips": "Отражения ночных многоэтажек в темной воде карьера.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.252,60.035&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.252,60.035&z=15&l=map",
+        "lon": 30.252,
+        "lat": 60.035,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "levashovo_forest_pond",
@@ -1425,7 +2048,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Горскому шоссе, затем 200 м укатанной грунтовки. Доступно для седанов.",
         "photo_tips": "Сосновый лес в свете фар, лунная дорожка на воде пруда.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.198,60.089&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.198,60.089&z=15&l=map",
+        "lon": 30.198,
+        "lat": 60.089,
+        "best_times": [
+            "night",
+            "sunset",
+            "day"
+        ]
     },
     {
         "id": "pesochny_pine_alley",
@@ -1445,7 +2075,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Ленинградской ул. пос. Песочный к лесному массиву.",
         "photo_tips": "Свет фар, освещающий стройные сосновые стволы вдоль пустой ночной дороги.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.155,60.118&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.155,60.118&z=15&l=map",
+        "lon": 30.155,
+        "lat": 60.118,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "korkinskoe_lake_pines",
@@ -1465,7 +2102,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "КАД -> Колтушское шоссе -> съезд на лесную дорогу к озеру. Доступно для всех машин.",
         "photo_tips": "Отражения высоких сосен в чистой родниковой воде под звездным небом.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.612,59.908&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.612,59.908&z=15&l=map",
+        "lon": 30.612,
+        "lat": 59.908,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "koltushi_panoramic_hills",
@@ -1485,7 +2129,15 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт через Колтуши до пос. Воейково, карманы для парковки на вершине камовых гряд.",
         "photo_tips": "Мягкие волны холмов на закате, вид на огни горизонта.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.685,59.938&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.685,59.938&z=15&l=map",
+        "lon": 30.685,
+        "lat": 59.938,
+        "best_times": [
+            "night",
+            "sunset",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "zhdanovskoe_first_lake",
@@ -1505,7 +2157,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Дороге Жизни через Всеволожск, поворот к озеру.",
         "photo_tips": "Отражения сосен в тихой темной озерной воде.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.685,59.998&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.685,59.998&z=15&l=map",
+        "lon": 30.685,
+        "lat": 59.998,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "rumbolovo_hill_view",
@@ -1525,7 +2184,15 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Дороге Жизни прямо на вершину холма к парковке.",
         "photo_tips": "Панорамный вид с вершины холма в свете ночных фонарей.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.655,60.035&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.655,60.035&z=15&l=map",
+        "lon": 30.655,
+        "lat": 60.035,
+        "best_times": [
+            "night",
+            "sunset",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "kokkorevo_ladoga_beach",
@@ -1545,7 +2212,15 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Дороге Жизни через Всеволожск до Коккорево, далее 200 м укатанного песка до стоянки.",
         "photo_tips": "Рассвет над бескрайней Ладогой, песчаные дюны и сосны в контровом свете.",
-        "yandex_map": "https://yandex.ru/maps/?pt=31.065,60.055&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=31.065,60.055&z=15&l=map",
+        "lon": 31.065,
+        "lat": 60.055,
+        "best_times": [
+            "night",
+            "sunset",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "kokkorevo_sosnovets_cape",
@@ -1565,7 +2240,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Дорога Жизни до Коккорево, накатанная песчаная грунтовка вдоль берега к мысу.",
         "photo_tips": "Песчаная коса и сосны на фоне бескрайней ночной Ладоги.",
-        "yandex_map": "https://yandex.ru/maps/?pt=31.082,60.072&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=31.082,60.072&z=15&l=map",
+        "lon": 31.082,
+        "lat": 60.072,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "osinovets_lighthouse_shore",
@@ -1585,7 +2267,15 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Идеальный асфальт по Дороге Жизни прямо до поселка Ладожское Озеро / Осиновец.",
         "photo_tips": "Вращающийся луч маяка на фоне ночных звезд над Ладожским озером.",
-        "yandex_map": "https://yandex.ru/maps/?pt=31.080556,60.118889&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=31.080556,60.118889&z=15&l=map",
+        "lon": 31.080556,
+        "lat": 60.118889,
+        "best_times": [
+            "night",
+            "sunset",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "ladoga_golsman_bay",
@@ -1605,7 +2295,15 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт по Дороге Жизни за Осиновец, съезд к сосняку у бухты.",
         "photo_tips": "Волны Ладоги, разбивающиеся о гранитные камни под луной.",
-        "yandex_map": "https://yandex.ru/maps/?pt=31.075,60.135&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=31.075,60.135&z=15&l=map",
+        "lon": 31.075,
+        "lat": 60.135,
+        "best_times": [
+            "night",
+            "sunset",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "morye_river_mouth_ladoga",
@@ -1625,7 +2323,14 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Дорога Жизни -> пос. Ладожское Озеро -> лесная грунтовка к устью реки Морье.",
         "photo_tips": "Река, впадающая в бескрайнее ночное озеро среди сосновых песков.",
-        "yandex_map": "https://yandex.ru/maps/?pt=31.025,60.185&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=31.025,60.185&z=15&l=map",
+        "lon": 31.025,
+        "lat": 60.185,
+        "best_times": [
+            "night",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "sestroretsk_bog",
@@ -1645,7 +2350,15 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт до Белоострова, далее 300м укатанной грунтовки до парковки у шлагбаума.",
         "photo_tips": "Кадр сверху вдоль мостков, силуэты сосен на фоне рассветного неба.",
-        "yandex_map": "https://yandex.ru/maps/?pt=29.998394,60.131742&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=29.998394,60.131742&z=15&l=map",
+        "lon": 29.998394,
+        "lat": 60.131742,
+        "best_times": [
+            "night",
+            "sunset",
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "toksovo_zubr",
@@ -1665,7 +2378,13 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт до парковки комплекса. Днем проезд свободный.",
         "photo_tips": "Зубры на фоне белого снега, кадры на качающемся мостике над рекой.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.457814,60.155787&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.457814,60.155787&z=15&l=map",
+        "lon": 30.457814,
+        "lat": 60.155787,
+        "best_times": [
+            "day",
+            "morning"
+        ]
     },
     {
         "id": "shuvalov_park_dacha",
@@ -1685,6 +2404,12 @@ PLACES = [
         "time_of_day": "Ночь / закат / вечер",
         "car_access": "Асфальт, парковка на ул. Заречной или Торфяном пер. Проедет любой седан.",
         "photo_tips": "Резные башенки дачи, гора Парнас с видом на пруды, склеп Полье.",
-        "yandex_map": "https://yandex.ru/maps/?pt=30.297491,60.073406&z=15&l=map"
+        "yandex_map": "https://yandex.ru/maps/?pt=30.297491,60.073406&z=15&l=map",
+        "lon": 30.297491,
+        "lat": 60.073406,
+        "best_times": [
+            "night",
+            "day"
+        ]
     }
 ]
