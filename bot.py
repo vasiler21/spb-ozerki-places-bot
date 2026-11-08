@@ -2,13 +2,14 @@
 """
 Telegram-бот для поиска атмосферных мест севера СПб и Ленинградской области.
 Старт: м. Озерки (Выборгское / Приморское шоссе, Скандинавия, Сортавала, КАД).
-Радиус: строго до 50 км.
+Радиус: настраиваемый (20, 30, 40, 50, до 60 км).
 Особенности:
-- Фильтр по времени: ночные споты (24/7 доступ, открытый въезд на авто по умолчанию).
+- Огромная база (100+ спотов) с фокусом на ночные локации 24/7.
+- Автоматическое фоновое обновление и поиск новых мест каждые 6 часов.
+- Выбор дистанции: 20 км -> 30 км -> 40 км -> 50 км -> до 60 км.
 - Спец-описание для ночного чилла: вид из машины, где постоять, покурить, отдохнуть.
 - Выбор зон: Курортный р-н, Дамба, Токсово/озера, Север СПб, Ладога.
 - Отметка «✅ Уже был здесь» (навсегда исключает место из показа).
-- Поддержка как нового интерфейса, так и старых кнопок с авто-обновлением клавиатуры.
 """
 
 import os
@@ -70,13 +71,13 @@ class AddPlaceForm(StatesGroup):
 
 
 def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
-    """Главная компактная клавиатура бота."""
+    """Главная компактная клавиатура бота (без лишней кнопки обновления, бот обновляется сам в фоне)."""
     kb = [
         [KeyboardButton(text="🧭 Смотреть локации")],
-        [KeyboardButton(text="🌙 Ночной фильтр (24/7)"), KeyboardButton(text="📏 Дистанция (до 50 км)")],
+        [KeyboardButton(text="🌙 Ночной фильтр (24/7)"), KeyboardButton(text="📏 Дистанция (до 60 км)")],
         [KeyboardButton(text="📍 Выбор зоны"), KeyboardButton(text="✅ Где я был")],
         [KeyboardButton(text="⭐ Избранное"), KeyboardButton(text="📊 Мой профиль")],
-        [KeyboardButton(text="🔄 Обновить базу"), KeyboardButton(text="🔁 Сбросить всё")]
+        [KeyboardButton(text="➕ Добавить место"), KeyboardButton(text="🔁 Сбросить всё")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
@@ -154,24 +155,26 @@ async def cmd_start(message: types.Message):
     zone_name = ZONE_NAMES.get(zone_val, "Весь Север СПб и ЛО")
     
     greeting = (
-        "👋 <b>Гид по ночным и атмосферным локациям севера СПб и ЛО обновлен!</b>\n\n"
+        "👋 <b>Гид по ночным и атмосферным спотам севера СПб и ЛО готов!</b>\n\n"
         "📍 <b>Точка старта: м. «Озерки»</b> (Выборгское/Приморское ш., «Скандинавия», «Сортавала», КАД и Дамба).\n"
-        "Радиус поиска: <b>строго до 50 км</b> (все дальние точки отсечены!).\n\n"
-        "🌙 <b>Что настроено:</b>\n"
-        "• <b>Ночной фильтр включен по умолчанию:</b> показываются только локации с открытым круглосуточным въездом на машине без закрытых ворот и шлагбаумов.\n"
-        "• <b>Авто-чилл:</b> для каждого места написано, где встать, какой вид на воду/огни и можно ли постоять у капота с кофе или покурить.\n"
-        "• <b>Кнопка «✅ Уже был здесь»:</b> жми на знакомых местах, и бот навсегда скроет их из ленты.\n\n"
+        "🗺 В каталоге собрано <b>более 100 проверенных локаций</b>.\n\n"
+        "🌙 <b>Что настроено для ночных поездок:</b>\n"
+        "• <b>Ночной фильтр 24/7 по умолчанию:</b> бот сразу выдает только места со свободным въездом на машине без ворот и шлагбаумов.\n"
+        "• <b>Авто-чилл:</b> подробное описание, где встать на машине, какой вид на воду/огни и можно ли постоять у капота с кофе или покурить.\n"
+        "• <b>Выбор дистанции:</b> шаг 20 км -> 30 км -> 40 км -> 50 км -> до 60 км.\n"
+        "• <b>Кнопка «✅ Уже был здесь»:</b> жми на знакомых местах, и бот навсегда скроет их из ленты.\n"
+        "• <b>Авто-обновление:</b> база сама обновляется и пополняется каждые 6 часов в фоновом режиме.\n\n"
         f"🎯 <b>Текущие настройки:</b>\n"
         f"• Режим: <b>{time_name}</b>\n"
-        f"• Макс. дистанция: <b>{dist_name}</b>\n"
+        f"• Дистанция: <b>{dist_name}</b>\n"
         f"• Направление: <b>{zone_name}</b>\n\n"
         "Жми <b>«🧭 Смотреть локации»</b>, чтобы начать выбор спота!"
     )
     await message.answer(greeting, parse_mode="HTML", reply_markup=get_main_menu_keyboard())
 
 
-# Обработка как новых, так и старых кнопок просмотра
-@dp.message(F.text.in_(["🧭 Смотреть локации", "Смотреть локации", "🧭 Найти ночной спот (до 50 км)"]))
+# Обработка просмотра локаций
+@dp.message(F.text.in_(["🧭 Смотреть локации", "Смотреть локации", "🧭 Найти ночной спот (до 60 км)", "🧭 Найти ночной спот (до 50 км)"]))
 async def show_feed(message: types.Message):
     """Показать следующую подходящую локацию."""
     user_id = message.from_user.id
@@ -186,11 +189,11 @@ async def show_feed(message: types.Message):
         await message.answer(
             f"🎉 <b>Ты просмотрел все доступные споты ({dist_name}, {time_name})!</b>\n\n"
             "Что можно сделать прямо сейчас:\n"
-            "1. Нажать <b>«🔄 Обновить базу»</b> — бот подгрузит свежие точки.\n"
-            "2. Переключить <b>«🌙 Ночной фильтр»</b> (например, посмотреть закатные споты) или сменить <b>«📍 Зону»</b>.\n"
-            "3. Увеличить радиус в <b>«📏 Дистанция»</b> (до 50 км).\n"
-            "4. Открыть <b>«✅ Где я был»</b> или <b>«⭐ Избранное»</b>.\n"
-            "5. Нажать <b>«🔁 Сбросить всё»</b>, чтобы пролистать базу заново.",
+            "1. Увеличить радиус в <b>«📏 Дистанция»</b> (например, выбрать до 40, 50 или 60 км).\n"
+            "2. Сменить <b>«📍 Зону»</b> или <b>«🌙 Ночной фильтр»</b> (например, посмотреть закатные споты).\n"
+            "3. Заглянуть в <b>«✅ Где я был»</b> или <b>«⭐ Избранное»</b>.\n"
+            "4. Нажать <b>«🔁 Сбросить всё»</b>, чтобы пролистать базу заново.\n\n"
+            "<i>База автоматически пополняется новыми точками каждые 6 часов.</i>",
             parse_mode="HTML",
             reply_markup=get_main_menu_keyboard()
         )
@@ -216,7 +219,7 @@ async def handle_like(callback: types.CallbackQuery):
         await callback.message.edit_text(
             "🎉 <b>Все локации в выбранном фильтре просмотрены!</b>\n\n"
             "Все сохраненные маршруты ждут тебя во вкладке <b>«⭐ Избранное»</b>.\n"
-            "Жми <b>«🔄 Обновить базу»</b> или смени зону/время поиска!",
+            "Попробуй увеличить радиус дистанции или сменить зону!",
             parse_mode="HTML"
         )
         return
@@ -238,7 +241,7 @@ async def handle_skip(callback: types.CallbackQuery):
     if not next_place:
         await callback.message.edit_text(
             "🎉 <b>Ты просмотрел все локации в этом фильтре!</b>\n\n"
-            "Попробуй изменить фильтры расстояния/зоны или нажми <b>«🔄 Обновить базу»</b>.",
+            "Попробуй выбрать больший радиус (например, до 50 или 60 км) в меню <b>«📏 Дистанция»</b>.",
             parse_mode="HTML"
         )
         return
@@ -386,7 +389,7 @@ async def select_time_filter(message: types.Message):
         
     await message.answer(
         "🌙 <b>Выбор фильтра по времени суток и доступности:</b>\n\n"
-        "• <b>🌙 Ночные споты 24/7</b>: только места со свободным круглосуточным въездом "
+        "• <b>🌙 Ночные споты 24/7</b> (по умолчанию): только места со свободным круглосуточным въездом "
         "(без заборов, шлагбаумов и закрытых ворот) — где можно встать на машине, постоять, покурить и отдохнуть.\n"
         "• <b>🌅 Закат и вечер</b>: видовые точки у воды и на возвышенностях.\n"
         "• <b>☀️ Дневные</b>: парки, экотропы и прогулки.\n"
@@ -412,9 +415,9 @@ async def save_time_filter(callback: types.CallbackQuery):
     )
 
 
-# ---------------- ФИЛЬТР РАССТОЯНИЯ (СТРОГО ДО 50 КМ) ----------------
+# ---------------- ФИЛЬТР РАССТОЯНИЯ (С ШАГОМ 20, 30, 40, 50, ДО 60 КМ) ----------------
 
-@dp.message(F.text.in_(["📏 Дистанция (до 50 км)", "📏 Фильтр расстояния", "Фильтр расстояния", "📏 Дистанция", "Дистанция"]))
+@dp.message(F.text.in_(["📏 Дистанция (до 60 км)", "📏 Дистанция (до 50 км)", "📏 Фильтр расстояния", "Фильтр расстояния", "📏 Дистанция", "Дистанция"]))
 async def change_distance_filter(message: types.Message):
     user_id = message.from_user.id
     current_filter = db.get_user_distance_filter(user_id)
@@ -425,8 +428,13 @@ async def change_distance_filter(message: types.Message):
         builder.row(InlineKeyboardButton(text=f"{mark}{label}", callback_data=f"set_dist_{key}"))
         
     await message.answer(
-        "📏 <b>Выбери максимальный радиус поездки от м. «Озерки»:</b>\n"
-        "Все расстояния ограничены <b>максимум 50 км</b> (никаких 100+ км на Выборг или Карелию).",
+        "📏 <b>Выбери максимальный радиус поездки от м. «Озерки»:</b>\n\n"
+        "Выбирай комфортную для себя дальность:\n"
+        "• <b>До 20 км</b> — быстрый выезд на 15–25 минут (Шувалово, Озерки, Юкки, Лисий Нос, Сертолово)\n"
+        "• <b>До 30 км</b> — ближний Курортный и озера (Сестрорецк, Разлив, Медное озеро, Токсово)\n"
+        "• <b>До 40 км</b> — побережье и Дамба (Репино, Комарово, Северная Дамба, Лемболово)\n"
+        "• <b>До 50 км</b> — дальний берег и Ладога (Зеленогорск, Рощино, форт Шанц, Осиновец)\n"
+        "• <b>До 60 км</b> — максимальный выезд (Приветнинское, Смолячково, Пески, Сосново)",
         parse_mode="HTML",
         reply_markup=builder.as_markup()
     )
@@ -463,11 +471,11 @@ async def select_zone_filter(message: types.Message):
         
     await message.answer(
         "📍 <b>Выбери район для поиска (северная часть СПб и области):</b>\n\n"
-        "• <b>Курортный р-н</b>: берег Финского залива от Сестрорецка до Зеленогорска.\n"
-        "• <b>Карельский перешеек & Озера</b>: Токсово, Рощино, Медное озеро, холмы.\n"
-        "• <b>Север СПб</b>: Озерки, Шувалово, Юкки, Лахта-Центр.\n"
-        "• <b>Дамба и Кронштадт</b>: створные молы посреди моря, форты.\n"
-        "• <b>Ладога</b>: пляжи Коккорево и Осиновецкий маяк.",
+        "• <b>Курортный р-н</b>: берег Финского залива от Сестрорецка до Зеленогорска и Приветнинского.\n"
+        "• <b>Карельский перешеек & Озера</b>: Токсово, Рощино, Медное озеро, Лемболово, холмы.\n"
+        "• <b>Север СПб</b>: Озерки, Шувалово, Юкки, Лахта-Центр, Крестовский.\n"
+        "• <b>Дамба и Кронштадт</b>: створные молы посреди моря, форт Шанц.\n"
+        "• <b>Ладога</b>: песчаные пляжи Коккорево и Осиновецкий маяк.",
         parse_mode="HTML",
         reply_markup=builder.as_markup()
     )
@@ -489,28 +497,16 @@ async def save_zone_filter(callback: types.CallbackQuery):
     )
 
 
-# ---------------- ОБНОВЛЕНИЕ БАЗЫ ДАННЫХ ----------------
-
+# Поддержка старой кнопки обновления (если осталась в истории чата)
 @dp.message(F.text.in_(["🔄 Обновить базу", "🔄 Обновить базу мест", "Обновить базу"]))
-async def manual_update_database(message: types.Message):
-    """Принудительное обновление, проверка доступности и поиск свежих локаций."""
-    status_msg = await message.answer(
-        "🔄 <i>Сканируем карты, проверяем режим доступности 24/7 и обновляем локации...</i>",
-        parse_mode="HTML"
-    )
-    await asyncio.sleep(1)
-    
+async def legacy_update_database(message: types.Message):
     added_count, total_count = db.auto_update_and_expand_places()
-    
-    result_text = (
-        "✅ <b>База данных актуализирована!</b>\n\n"
-        f"✨ Добавлено новых точек: <b>{added_count}</b>\n"
-        f"🗺 Всего активных спотов до 50 км: <b>{total_count}</b>\n"
-        f"🕒 Проверены режимы работы: все ночные места открыты 24/7.\n"
-        f"🔄 Автоматическое фоновое обновление работает каждые 6 часов.\n\n"
-        "Жми <b>«🧭 Смотреть локации»</b>, чтобы отправиться в путь!"
+    await message.answer(
+        f"✅ <b>База актуальна (всего {total_count} спотов до 60 км)!</b>\n\n"
+        "Бот сам обновляет и дополняет базу каждые 6 часов в фоне, кнопку нажимать не требуется.",
+        parse_mode="HTML",
+        reply_markup=get_main_menu_keyboard()
     )
-    await status_msg.edit_text(result_text, parse_mode="HTML", reply_markup=get_main_menu_keyboard())
 
 
 # ---------------- ИЗБРАННОЕ ----------------
@@ -651,10 +647,10 @@ async def user_profile(message: types.Message):
         f"✅ <b>Уже побывал:</b> {stats['visited_count']}\n"
         f"➡️ <b>Пропущено:</b> {stats['skipped_count']}\n\n"
         f"✨ <b>Любимый вайб:</b> {fav_pref}\n"
-        f"🎯 <b>Радиус:</b> {stats['dist_filter']}\n"
+        f"🎯 <b>Радиус поиска:</b> {stats['dist_filter']}\n"
         f"🌙 <b>Режим времени:</b> {stats['time_filter']}\n"
-        f"📍 <b>Зона:</b> {stats['zone_filter']}\n\n"
-        "<i>Алгоритм ставит вперед ленты секретные и ночные споты!</i>"
+        f"📍 <b>Направление:</b> {stats['zone_filter']}\n\n"
+        "<i>База автоматически пополняется каждые 6 часов.</i>"
     )
     await message.answer(profile_text, parse_mode="HTML", reply_markup=get_main_menu_keyboard())
 
@@ -695,6 +691,95 @@ async def cancel_reset_history(callback: types.CallbackQuery):
     await callback.message.delete()
 
 
+# ---------------- ДОБАВЛЕНИЕ СВОЕГО МЕСТА ----------------
+
+@dp.message(F.text.in_(["➕ Добавить место", "Добавить место"]))
+async def start_add_place(message: types.Message, state: FSMContext):
+    await state.set_state(AddPlaceForm.waiting_title)
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="Отмена", callback_data="cancel_add_place"))
+    
+    await message.answer(
+        "📍 <b>Добавление новой секретной точки в каталог</b>\n\n"
+        "Шаг 1 из 3: Введи <b>название места</b> (например: <i>Секретный мыс в Репино</i>):",
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
+
+
+@dp.callback_query(F.data == "cancel_add_place")
+async def cancel_add_place_handler(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("❌ Добавление места отменено.", parse_mode="HTML")
+
+
+@dp.message(AddPlaceForm.waiting_title)
+async def process_place_title(message: types.Message, state: FSMContext):
+    await state.update_data(title=message.text.strip())
+    await state.set_state(AddPlaceForm.waiting_vibe)
+    
+    await message.answer(
+        "✨ Шаг 2 из 3: Опиши <b>вайб и почему круто ночью</b> (вид на воду, огни, можно ли постоять на машине, покурить):",
+        parse_mode="HTML"
+    )
+
+
+@dp.message(AddPlaceForm.waiting_vibe)
+async def process_place_vibe(message: types.Message, state: FSMContext):
+    await state.update_data(vibe=message.text.strip())
+    await state.set_state(AddPlaceForm.waiting_map)
+    
+    await message.answer(
+        "🗺 Шаг 3 из 3: Отправь <b>ссылку на Яндекс.Карты</b> или ориентир:",
+        parse_mode="HTML"
+    )
+
+
+@dp.message(AddPlaceForm.waiting_map)
+async def process_place_map(message: types.Message, state: FSMContext):
+    map_link = message.text.strip()
+    data = await state.get_data()
+    await state.clear()
+    
+    import time
+    place_id = f"custom_{int(time.time())}"
+    
+    new_place = {
+        "id": place_id,
+        "title": data["title"],
+        "category": "night_chill",
+        "zone": "kurortny",
+        "distance_km": 25,
+        "car_time": "25-30 мин",
+        "range_group": "30",
+        "is_24_7": 1,
+        "opening_hours": "Круглосуточно 24/7",
+        "night_vibe": data["vibe"],
+        "car_chill": 1,
+        "popularity": "secret",
+        "vibe": data["vibe"],
+        "season": "Круглый год",
+        "time_of_day": "Круглосуточно / Ночь",
+        "car_access": "Свободный подъезд на авто",
+        "photo_tips": "Красивые панорамы",
+        "yandex_map": map_link if map_link.startswith("http") else f"https://yandex.ru/maps/?text={map_link}"
+    }
+    
+    success = db.add_custom_place(new_place)
+    if success:
+        await message.answer(
+            f"🎉 <b>Локация «{data['title']}» успешно сохранена!</b>\n\n"
+            "Она сразу стала доступна в общей ленте рекомендаций.",
+            parse_mode="HTML",
+            reply_markup=get_main_menu_keyboard()
+        )
+    else:
+        await message.answer(
+            "⚠️ Ошибка при сохранении. Попробуйте еще раз позже.",
+            reply_markup=get_main_menu_keyboard()
+        )
+
+
 # ---------------- ФОНОВОЕ ОБНОВЛЕНИЕ БАЗЫ (КАЖДЫЕ 6 ЧАСОВ) ----------------
 
 async def background_auto_updater():
@@ -704,7 +789,7 @@ async def background_auto_updater():
             await asyncio.sleep(21600)  # 6 часов
             added, total = db.auto_update_and_expand_places()
             if added > 0:
-                logger.info(f"[Авто-обновление] Успешно добавлено {added} новых локаций. Всего до 50 км: {total}")
+                logger.info(f"[Авто-обновление] Успешно добавлено {added} новых локаций. Всего в базе: {total}")
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -740,10 +825,9 @@ async def main():
         
     print("=" * 60)
     print("[+] Ночной бот атмосферных локаций севера СПб запущен!")
-    print("[+] Радиус: строго до 50 км (м. Озерки / Север СПб / ЛО).")
-    print("[+] Фильтр времени: Ночной режим 24/7 по умолчанию.")
-    print("[+] Отметка «Уже был здесь» и исключение посещенных спотов.")
-    print("[+] Поддержка старых и новых кнопок клавиатуры.")
+    print("[+] Настраиваемый радиус: 20 -> 30 -> 40 -> 50 -> 60 км.")
+    print("[+] База расширена: 100+ локаций с фокусом на ночные споты 24/7.")
+    print("[+] Кнопка обновления убрана из меню: работает авто-обновление каждые 6 часов.")
     print("=" * 60)
     
     # Запуск фонового health-check сервера
